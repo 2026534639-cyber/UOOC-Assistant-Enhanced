@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.7.2
+// @version      2.7.3
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.7.2 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.7.3 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -251,6 +251,61 @@
     }
 
     // ==================== 学习进度悬浮窗 ====================
+    // "正在导航"标记: 点开章节/测验/讨论后置位, 用来抑制这期间的自动播放(防重播)。
+    // 但部分失败路径会漏复位, 一旦卡在 true, 自动播放就被永久抑制
+    // → 表现为"明明点开了视频，却不会自己播"。超时视为过期, 强制清除。
+    function isNavPending() {
+        if (!window.__uoocNavPending) return false;
+        if (window.__uoocNavPendingAt && Date.now() - window.__uoocNavPendingAt > 25000) {
+            window.__uoocNavPending = false;
+            window.__uoocNavPendingAt = 0;
+            console.log('[UOOC助手] 导航标记超时未复位，已自动清除（恢复自动播放）');
+            return false;
+        }
+        return true;
+    }
+
+    // 等系统确认看完 (侧栏当前任务行出现 complete 打勾) 再切下一个。
+    // 视频 ended 只是本地播放结束, 服务端可能还没确认 —— 立刻切会导致这次学习不记账,
+    // 闯关模式下下一个任务也可能还没解锁。
+    function waitCurrentTaskDone(cb) {
+        var continueBox = document.getElementById('continue');
+        if (!continueBox || !continueBox.checked) { cb(); return; }
+        if (window.__uoocWaitingDone) { console.log('[UOOC助手] 已在等系统确认，忽略重复触发'); return; }
+        window.__uoocWaitingDone = true;
+        var deadline = Date.now() + 120000; // 最多等 2 分钟
+        var ticks = 0, finished = false;
+        var finish = function(msg) {
+            if (finished) return;
+            finished = true;
+            window.__uoocWaitingDone = false;
+            if (msg) console.log(msg);
+            cb();
+        };
+        (function poll() {
+            if (finished) return;
+            var rows = Array.from(document.querySelectorAll('.basic'));
+            var cur = rows.find(function(r) { return r.classList.contains('active'); });
+            if (!cur) {
+                // 侧栏重渲染期间 active 行会短暂消失 → 继续等
+                if (Date.now() < deadline) { setTimeout(poll, 1500); return; }
+                finish('[UOOC助手] 等不到当前任务行（已等2分钟），继续连播');
+                return;
+            }
+            if (cur.classList.contains('complete')) {
+                finish(ticks > 0 ? '[UOOC助手] ✅ 系统已确认完成（打勾），继续连播' : null);
+                return;
+            }
+            ticks++;
+            if (ticks === 2) console.log('[UOOC助手] 视频已播完，等待系统确认打勾后再切下一个...');
+            if (Date.now() >= deadline) {
+                finish('[UOOC助手] ⚠️ 等系统确认超时（2分钟）仍未打勾，仍继续连播；若下一个点不开，说明这条视频没被计分');
+                return;
+            }
+            setTimeout(poll, 1500);
+        })();
+    }
+
     // 统计侧栏任务行 (goSource): complete 打勾 = 已看/已完成
     function collectProgress() {
         const rows = Array.from(document.querySelectorAll('.basic'));
@@ -1580,7 +1635,7 @@
                 if (document.getElementById('volume') && document.getElementById('volume').checked) {
                     v.muted = true;
                 }
-                if (document.getElementById('play') && document.getElementById('play').checked && !window.__uoocNavPending) {
+                if (document.getElementById('play') && document.getElementById('play').checked && !isNavPending()) {
                     const playPromise = v.play();
                     if (playPromise && typeof playPromise.catch === 'function') {
                         playPromise.catch(() => {});
@@ -1635,8 +1690,8 @@
             var now = Date.now();
             if (window.__uoocLastEnded && now - window.__uoocLastEnded < 4000) return;
             window.__uoocLastEnded = now;
-            console.log('[UOOC助手] 视频播放结束，触发连播');
-            findNextVideo();
+            console.log('[UOOC助手] 视频播放结束，等系统确认打勾后再连播');
+            waitCurrentTaskDone(function() { findNextVideo(); });
         };
         video.onended = endedHandler;
         video.addEventListener('ended', endedHandler);
@@ -1671,7 +1726,7 @@
             setInterval(function() {
                 var v = getCurrentVideo(); // 动态获取当前视频 (SPA导航后自动更新)
                 if (v && document.getElementById('play') && document.getElementById('play').checked) {
-                    if (v.paused && !v.ended && !window.__uoocNavPending) {
+                    if (v.paused && !v.ended && !isNavPending()) {
                         console.log('[UOOC助手] 检测到视频暂停，自动恢复播放');
                         const playPromise = v.play();
                         if (playPromise && typeof playPromise.catch === 'function') {
@@ -2165,7 +2220,7 @@
 
         // 应用播放 (排除已播完的视频: ended 状态下调 play() 会从头重播,
         // 与连播"遇测验停止"叠加后会形成 无限重播循环, 必须排除)
-        if (play && play.checked && video.paused && !video.ended && !window.__uoocNavPending) {
+        if (play && play.checked && video.paused && !video.ended && !isNavPending()) {
             console.log('[UOOC助手] 自动播放视频');
             const playPromise = video.play();
             if (playPromise && typeof playPromise.catch === 'function') {
@@ -2197,7 +2252,7 @@
                         (!window.__uoocLastForwardClick || Date.now() - window.__uoocLastForwardClick >= 15000)) {
                         window.__uoocLastEnded = Date.now();
                         console.log('[UOOC助手] 检测到视频停在结尾，重试连播推进');
-                        findNextVideo();
+                        waitCurrentTaskDone(function() { findNextVideo(); });
                     }
                 } catch(e) {}
             }, 3000);
@@ -2611,7 +2666,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.2';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.3';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2996,38 +3051,71 @@
                 let normLabel = (t) => {
                     return String(t || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
                 };
+                // 侧栏层级靠缩进编码: 章=40px 节=50px 知识点=80px 任务=110px。
+                // 判断"标题是否已展开"必须看缩进: 旧判据是"下一行是不是任务行(goSource)",
+                // 但展开后的标题下一行往往是【子知识点标题】而不是任务行, 于是被判成"没展开"
+                // → 再点一次 → 把已经展开的节点重新折叠 → 其子行从 DOM 里消失
+                // → 扫描越过整节落到下一个同级 (表现为"从 4.1 跳过 4.2 直接到 4.3")
+                let depth = (row) => {
+                    if (!row) return -1;
+                    var p = parseInt(getComputedStyle(row).paddingLeft, 10);
+                    return isNaN(p) ? -1 : p;
+                };
+                let isExpandedHeading = (row, i, rows) => {
+                    var nx = rows[i + 1];
+                    return !!nx && depth(nx) > depth(row);
+                };
                 // 顺序连播 = 目录树遍历 (多层级: 章节→小节→知识点→任务):
                 // 1. 从当前位置向后扫, 跳过测验/讨论/文本, 遇视频就播
                 // 2. 遇到折叠的标题 → 点击进入, 然后【等待它的任务列表渲染出来】才继续扫
                 //    (不等待的话会跳过该知识点直接点到更后面的大章节 — 闯关模式会走乱)
                 // 3. 等待超时 (空知识点) → 跳过它继续
-                let linearScan = (attemptsLeft, waitText) => {
+                let linearScan = (attemptsLeft, waitText, waitIdx) => {
                     let rows = Array.from(document.querySelectorAll('.basic'));
                     let startIdx;
 
                     if (waitText) {
-                        // 正在等待刚进入的标题 (waitText) 渲染出任务列表
+                        // 正在等待刚点开的标题渲染出【子级】(缩进更深才算)
+                        // 先按原下标认: 展开只会在它后面插入行, 它自己的下标不会变 ——
+                        // 这解决了"本节课件"这类重名标题被 indexOf 匹配到更早那一个的问题
                         let idx = -1;
-                        for (let k = 0; k < rows.length; k++) {
-                            let t = normLabel(rows[k].innerText);
-                            if (t === waitText || t.indexOf(waitText) >= 0) { idx = k; break; }
+                        if (typeof waitIdx === 'number' && rows[waitIdx] && normLabel(rows[waitIdx].innerText) === waitText) {
+                            idx = waitIdx;
                         }
                         if (idx < 0) {
-                            if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText); }, 700); return; }
+                            for (let k = 0; k < rows.length; k++) {
+                                if (normLabel(rows[k].innerText) === waitText) { idx = k; break; }
+                            }
+                        }
+                        if (idx < 0) {
+                            for (let k = 0; k < rows.length; k++) {
+                                if (normLabel(rows[k].innerText).indexOf(waitText) >= 0) { idx = k; break; }
+                            }
+                        }
+                        if (idx < 0) {
+                            if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText, waitIdx); }, 800); return; }
                             window.__uoocNavPending = false;
                             console.log('[UOOC助手] 目标章节未渲染出来，连播停止');
                             return;
                         }
-                        let nextRow = rows[idx + 1];
-                        let nextNg = nextRow ? (nextRow.getAttribute('ng-click') || '') : '';
-                        if (nextNg.indexOf('goSource') < 0) {
-                            // 任务列表还没渲染出来 → 继续等 (绝不越过它往下扫)
-                            if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText); }, 700); return; }
-                            // 等待超时: 该层级没有任务 (空知识点) → 跳过它, 从下一行继续
-                            console.log('[UOOC助手]', waitText, '下无任务，跳过');
+                        if (!(rows[idx + 1] && depth(rows[idx + 1]) > depth(rows[idx]))) {
+                            // 子级还没渲染出来 → 继续等, 绝不越过它往下扫
+                            if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText, idx); }, 800); return; }
+                            // 兜底: 行数变少 = 刚才那一下其实是"把已展开的节点折叠了"(缩进判据在该页面失效)
+                            // → 再点一次展开回来, 从原地重扫, 绝不越过它
+                            if (typeof window.__uoocClickRowsBefore === 'number' && rows.length < window.__uoocClickRowsBefore) {
+                                console.log('[UOOC助手] ⚠️ 刚才误把已展开的', waitText, '折叠了，正在展开回来重新扫描');
+                                rows[idx].click();
+                                window.__uoocClickRowsBefore = rows.length;
+                                if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText, idx); }, 900); return; }
+                                window.__uoocNavPending = false;
+                                return;
+                            }
+                            // 等够了还是没有子级 → 该节点确实没有内容, 从它的下一行 (同级) 继续
+                            console.log('[UOOC助手]', waitText, '下没有子内容，跳过它继续');
                             startIdx = idx + 1;
                         } else {
-                            startIdx = idx + 1; // 任务列表已渲染, 从它的任务开始找视频
+                            startIdx = idx + 1; // 子级已渲染, 从它的第一个子行开始找
                         }
                     } else {
                         let cur = rows.findIndex(r => r.classList.contains('active'));
@@ -3048,23 +3136,24 @@
                         let row = rows[i];
                         let ng = row.getAttribute('ng-click') || '';
                         if (ng.indexOf('toggleChapter') >= 0) {
-                            // 标题行: 下一行是任务行 → 已展开 (继续扫); 下一行还是标题 → 折叠的, 点击进入
-                            let nextRow = rows[i + 1];
-                            let nextNg = nextRow ? (nextRow.getAttribute('ng-click') || '') : '';
-                            let expanded = nextNg.indexOf('goSource') >= 0;
-                            if (!expanded) {
+                            // 已展开 (下一行缩进更深) → 直接继续扫它的子级
+                            // 只对【折叠的】标题点一下进入下一层; 对已展开的绝不能再点,
+                            // 否则 toggle 语义会把整节折叠起来, 子行消失, 扫描就跳过了这一节
+                            if (!isExpandedHeading(row, i, rows)) {
                                 var hText = normLabel(row.innerText);
                                 window.__uoocNavPending = true;
+                                window.__uoocNavPendingAt = Date.now();
+                                window.__uoocClickRowsBefore = rows.length; // 供"误折叠"兜底判据用
                                 row.click();
                                 console.log('[UOOC助手] 进入下一章节/知识点:', hText);
                                 if (attemptsLeft > 1) {
-                                    setTimeout(() => { linearScan(attemptsLeft - 1, hText); }, 900);
+                                    setTimeout(() => { linearScan(attemptsLeft - 1, hText, i); }, 900);
                                 } else {
                                     window.__uoocNavPending = false;
                                 }
                                 return;
                             }
-                            continue; // 已展开的标题: 它的任务行就在后面, 继续扫
+                            continue; // 已展开的标题: 它的子行就在后面, 继续扫
                         }
                         if (ng.indexOf('goSource') >= 0) {
                             if (isVideo(row)) {
@@ -3078,6 +3167,7 @@
                                 // 连播遇到测验: 进入并自动完成 (AI 填答 + 自动提交), 而不是跳过卡住
                                 console.log('[UOOC助手] 连播遇到测验，进入并自动完成');
                                 window.__uoocNavPending = true;
+                                window.__uoocNavPendingAt = Date.now();
                                 window.__uoocSilentAnswer = true;
                                 window.__uoocAnswerBusy = true;
                                 window.__uoocLastForwardClick = Date.now();
@@ -3094,6 +3184,7 @@
                                 // 连播遇到讨论: 进入并自动发布多条不同角度发言 (静默)
                                 console.log('[UOOC助手] 连播遇到讨论，进入并自动发布');
                                 window.__uoocNavPending = true;
+                                window.__uoocNavPendingAt = Date.now();
                                 window.__uoocSilentAnswer = true;
                                 row.click();
                                 if (attemptsLeft > 1) {
