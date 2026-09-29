@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.9.1
+// @version      2.9.3
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.9.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.9.3 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2056,6 +2056,88 @@
         return true;
     }
 
+    // ==================== 讨论清扫进度面板 ====================
+    // 「不动弹有点焦虑」—— 清扫期间每发一条要等 6~12 秒，中间页面看起来毫无变化。
+    // 这个面板持续显示：进度条 / 已处理 N 个 / 当前在哪个讨论 / 正在发第几条 /
+    // 以及"下一条还有几秒"，每秒钟都在动，能看出它确实在干活。
+    function countCourseDiscussions() {
+        if (window.__uoocSweepTotal) return Promise.resolve(window.__uoocSweepTotal);
+        return getCatalogListData().then(function(json) {
+            var chapters = json && (json.data || json);
+            var n = 0;
+            (function walk(list) {
+                (list || []).forEach(function(node) {
+                    (node.icon_list || []).forEach(function(ic) { if (String(ic.type) === '70') n++; });
+                    if (node.children && node.children.length) walk(node.children);
+                });
+            })(chapters);
+            window.__uoocSweepTotal = n;
+            return n;
+        }).catch(function() { return 0; });
+    }
+
+    function ensureSweepPanel() {
+        var panel = document.getElementById('uooc-sweep-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'uooc-sweep-panel';
+            panel.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:99999;background:rgba(30,30,30,0.94);color:#eee;padding:10px 14px;border-radius:8px;font-size:12px;font-family:Arial,"Microsoft YaHei",sans-serif;box-shadow:0 2px 12px rgba(0,0,0,0.45);min-width:260px;display:none;line-height:1.6;';
+            panel.innerHTML =
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
+                    '<b style="color:#7fb2ff;">💬 讨论清扫</b>' +
+                    '<span id="uooc-sweep-close" style="cursor:pointer;color:#aaa;font-size:15px;padding:0 4px;" title="隐藏面板（清扫仍在继续）">×</span>' +
+                '</div>' +
+                '<div style="background:#444;border-radius:4px;height:8px;overflow:hidden;">' +
+                    '<div id="uooc-sweep-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#3d5a80,#7fb2ff);transition:width .4s ease;"></div>' +
+                '</div>' +
+                '<div id="uooc-sweep-count" style="margin-top:5px;color:#ffd54a;font-weight:bold;">已处理 0 个讨论</div>' +
+                '<div id="uooc-sweep-status" style="color:#ddd;">准备中...</div>' +
+                '<div id="uooc-sweep-ago" style="color:#999;font-size:10px;margin-top:3px;">—</div>';
+            document.body.appendChild(panel);
+            document.getElementById('uooc-sweep-close').onclick = function() {
+                panel.style.display = 'none';
+            };
+        }
+        panel.style.display = 'block';
+        return panel;
+    }
+
+    // 状态变化时调用（顺带记录"刚刚动过"的时间）
+    function touchSweepPanel(statusText) {
+        if (statusText) window.__uoocSweepStatus = statusText;
+        window.__uoocSweepTouchedAt = Date.now();
+        updateSweepPanel();
+    }
+
+    function updateSweepPanel() {
+        var panel = document.getElementById('uooc-sweep-panel');
+        if (!panel || panel.style.display === 'none') return;
+        var done = window.__uoocSweepPosted || 0;
+        var total = window.__uoocSweepTotal || 0;
+        var fill = document.getElementById('uooc-sweep-fill');
+        var cnt = document.getElementById('uooc-sweep-count');
+        var st = document.getElementById('uooc-sweep-status');
+        var ago = document.getElementById('uooc-sweep-ago');
+        if (fill) fill.style.width = (total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0) + '%';
+        if (cnt) cnt.textContent = '已处理 ' + done + ' 个讨论' + (total > 0 ? ' / 共 ' + total + ' 个' : '');
+        if (st) st.textContent = window.__uoocSweepStatus || '';
+        if (ago) {
+            var parts = [];
+            if (window.__uoocSweepNextAt && window.__uoocSweepNextAt > Date.now()) {
+                parts.push('下一条还有 ' + Math.ceil((window.__uoocSweepNextAt - Date.now()) / 1000) + ' 秒');
+            } else if (window.__uoocSweepTouchedAt) {
+                parts.push('上次动作 ' + Math.round((Date.now() - window.__uoocSweepTouchedAt) / 1000) + ' 秒前');
+            }
+            ago.textContent = parts.join(' · ') || '—';
+        }
+    }
+
+    // 1 秒心跳：负责刷新"还有几秒 / 多久没动"，让面板一直在动
+    function startSweepHeartbeat() {
+        if (window.__uoocSweepTimer) return;
+        window.__uoocSweepTimer = setInterval(updateSweepPanel, 1000);
+    }
+
     // ==================== 讨论清扫（只刷讨论） ====================
     // 使用场景: 视频/测验都已经刷完, 只剩讨论没做 —— 点一下「💬 自动讨论」,
     // 脚本从当前讨论开始发 3 条, 然后自动去找下一个讨论、再发 3 条……直到没有讨论为止。
@@ -2071,7 +2153,43 @@
         }
         var n = window.__uoocSweepPosted || 0;
         console.log('[UOOC助手-讨论] ' + (msg || '讨论清扫结束') + '，本次共处理 ' + n + ' 个讨论');
+        window.__uoocSweepNextAt = 0;
+        touchSweepPanel('已结束：本次共处理 ' + n + ' 个讨论');
+        setTimeout(function() {
+            var p = document.getElementById('uooc-sweep-panel');
+            if (p) p.style.display = 'none';
+        }, 10000);
         if (msg) alert(msg + '\n本次共处理 ' + n + ' 个讨论');
+    }
+
+    // 页面上"共 N 条回复"的 N —— 服务端口径, 不受分页/排序影响
+    function getReplyCountFromHeader() {
+        var m = (document.body.innerText || '').match(/共\s*(\d+)\s*条回复/);
+        return m ? parseInt(m[1], 10) : null;
+    }
+
+    // 发布后确认：到底提交上没有。
+    // 三个判据任一命中即认为成功:
+    //   ① 页面"共 N 条回复"的 N 变大了（最可靠, 服务端口径）
+    //   ② 新发言的文字出现在回复列表里
+    //   ③ 回复框被页面清空了（分页/排序导致新回复不在当前视图时, ①② 会失效）
+    function confirmReplyPosted(text, done) {
+        var probe = String(text || '').replace(/\s/g, '').slice(0, 12);
+        var beforeHeader = getReplyCountFromHeader();
+        var tries = 12;
+        (function poll() {
+            var nowHeader = getReplyCountFromHeader();
+            var grew = (beforeHeader !== null && nowHeader !== null && nowHeader > beforeHeader);
+            var list = getExistingReplies();
+            var appeared = probe.length >= 6 && list.some(function(t) {
+                return String(t).replace(/\s/g, '').indexOf(probe) >= 0;
+            });
+            var ta = document.querySelector('.replay-editor textarea[ng-model="content"]');
+            var cleared = !!ta && (ta.value || '').trim() === '';
+            if (grew || appeared || cleared) { done(true, nowHeader); return; }
+            if (tries-- <= 0) { done(false, nowHeader); return; }
+            setTimeout(poll, 1000);
+        })();
     }
 
     function autoDiscussFlow() {
@@ -2090,6 +2208,15 @@
         window.__uoocSweepPosted = 0;
         window.__uoocSweptHashes = {};
         window.__uoocAutoChainStopped = false;
+        window.__uoocSweepTotal = 0;
+        window.__uoocSweepNextAt = 0;
+        // 进度面板: 从这一刻起每一步都有可见反馈
+        ensureSweepPanel();
+        startSweepHeartbeat();
+        touchSweepPanel('正在识别讨论话题…');
+        countCourseDiscussions().then(function(n) {
+            touchSweepPanel(n > 0 ? ('课程共 ' + n + ' 个讨论，开始处理') : '开始处理');
+        });
         if (window.__uoocDiscussBtn) {
             window.__uoocDiscussBtn.innerText = '💬 停止讨论';
             window.__uoocDiscussBtn.title = '讨论清扫进行中，点击停止';
@@ -2143,6 +2270,7 @@
             }
             window.__uoocSweptHashes[curHash] = true;
             console.log('[UOOC助手-讨论] 清扫中，处理讨论:', curHash.slice(0, 70));
+            touchSweepPanel('第 ' + ((window.__uoocSweepPosted || 0) + 1) + ' 个讨论：正在读取话题与已有发言…');
         }
         var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
         // 新版讨论页回复框是普通 textarea(不再是 UEditor) —— 判据要跟着改,
@@ -2163,13 +2291,20 @@
         console.log('[UOOC助手] 检测到讨论话题:', topic.substring(0, 60));
         window.__uoocSilentAnswer = true;
         var existing = getExistingReplies();
+        if (window.__uoocDiscussSweep) {
+            var hdr = getReplyCountFromHeader();
+            touchSweepPanel('话题：' + topic.substring(0, 20) + '…（' +
+                            (hdr !== null ? '服务端记 ' + hdr + ' 条回复' : '已有 ' + existing.length + ' 条发言') + '）');
+        }
         var prompt = buildDiscussPrompt(topic, existing, 3);
+        if (window.__uoocDiscussSweep) touchSweepPanel('正在让 AI 生成 3 条发言…（约几秒）');
 
         callLLMText(prompt).then(function(resp) {
             var fresh = parseNumberedReplies(resp, 3).filter(function(r) {
                 return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
             });
             if (fresh.length === 0) {
+                if (window.__uoocDiscussSweep) touchSweepPanel('生成的发言与已有内容重复，换角度重写…');
                 console.log('[UOOC助手-讨论] 生成内容与已有发言重复，跳过该讨论继续连播');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
@@ -2182,9 +2317,11 @@
                 var cb = document.getElementById('continue');
                 if (!window.__uoocDiscussSweep && (!cb || !cb.checked)) { window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
                 if (i >= fresh.length) {
-                    if (window.__uoocDiscussSweep) window.__uoocSweepPosted = (window.__uoocSweepPosted || 0) + 1;
+                    if (window.__uoocDiscussSweep) { window.__uoocSweepPosted = (window.__uoocSweepPosted || 0) + 1; window.__uoocSweepNextAt = 0; }
+                    if (window.__uoocDiscussSweep) touchSweepPanel('本讨论完成（' + fresh.length + ' 条），准备找下一个讨论…');
                     console.log('[UOOC助手-讨论] 本讨论自动发布完成 (' + fresh.length + ' 条)' +
                                 (window.__uoocDiscussSweep ? '，5 秒后自动找下一个讨论' : '，5 秒后继续连播'));
+                    if (window.__uoocDiscussSweep) touchSweepPanel('正在查找下一个讨论…');
                     setTimeout(function() {
                         window.__uoocSilentAnswer = false;
                         window.__uoocNavPending = false;
@@ -2193,11 +2330,25 @@
                     }, 5000);
                     return;
                 }
+                if (window.__uoocDiscussSweep) touchSweepPanel('正在发布第 ' + (i + 1) + '/' + fresh.length + ' 条…');
                 var ok = postDiscussionReply(fresh[i]);
                 if (ok) {
                     console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', fresh[i].substring(0, 60));
+                    // 真的去核对回复列表有没有多出来 —— 回答"到底提交上没有"
+                    if (window.__uoocDiscussSweep) {
+                        confirmReplyPosted(fresh[i], function(confirmed) {
+                            if (confirmed) {
+                                touchSweepPanel('✅ 第 ' + (i + 1) + '/' + fresh.length + ' 条已确认提交');
+                            } else {
+                                touchSweepPanel('⚠️ 第 ' + (i + 1) + '/' + fresh.length + ' 条点了回复，但没看到新发言（可能被拦截或需人机验证）');
+                                console.log('[UOOC助手-讨论] ⚠️ 第' + (i + 1) + '条未确认提交，请手动检查');
+                            }
+                        });
+                    }
                     i++;
-                    setTimeout(postNext, 6000 + Math.floor(Math.random() * 6000));
+                    var delay = 6000 + Math.floor(Math.random() * 6000);
+                    if (window.__uoocDiscussSweep) window.__uoocSweepNextAt = Date.now() + delay;
+                    setTimeout(postNext, delay);
                 } else {
                     console.log('[UOOC助手-讨论] 编辑器不可用，跳过继续连播');
                     window.__uoocSilentAnswer = false;
@@ -2834,7 +2985,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.1';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.3';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
