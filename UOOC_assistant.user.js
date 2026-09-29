@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.8.5
+// @version      2.8.6
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.8.5 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.8.6 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2380,18 +2380,6 @@
                         window.__uoocForwardRetry = 0; // 进入正常内容页 → 清零
                     }
                 } catch (e) {}
-                // 界面自愈: Angular 重新渲染 header 时会把注入的界面节点一起冲掉 ——
-                // 表现就是"功能还在(静音/倍速照常生效)，但界面不见了，必须刷新页面"。
-                // 每 3 秒查一次, 发现界面不在了就重新放置 (placeComponents 已做成可重入)。
-                try {
-                    if (!document.getElementById('checkbox-container')) {
-                        if (!window.__uoocUiRepairAt || Date.now() - window.__uoocUiRepairAt > 5000) {
-                            window.__uoocUiRepairAt = Date.now();
-                            console.log('[UOOC助手] 界面节点不见了（被页面重渲染冲掉），正在重新放置界面...');
-                            placeComponents();
-                        }
-                    }
-                } catch (e) { console.warn('[UOOC助手] 重新放置界面失败:', e); }
             }, 3000);
         }
 
@@ -2448,7 +2436,15 @@
     function placeComponents() {
         console.log('[UOOC助手] 开始放置UI组件');
 
-        // 重入安全: 本函数现在会被"界面自愈"重复调用(见 3 秒轮询)。
+        // 界面已经在页面上 → 什么都不用做。
+        // 注意: 这个守卫必须在"清理上一轮注入"【之前】, 否则清理一跑守卫就永远失效、
+        // 每次调用都会整套重建(白干活, 还会把用户当前勾选状态重置)。
+        if (document.getElementById('checkbox-container')) {
+            console.log('[UOOC助手] UI组件已存在，跳过添加');
+            return true;
+        }
+
+        // 重入安全: 本函数会被"界面看门狗"重复调用(界面被页面重渲染冲掉时)。
         // 先把上一轮注入的壳拆干净, 否则每重入一次就把 headContent 多套一层:
         //   · #head-content-wrapper 里装的是页面原有内容 → 挪回原父节点后再删壳
         //   · #checkbox-container / #control-panel-toggle 是纯注入物 → 直接删
@@ -2827,7 +2823,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.5';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.6';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2862,11 +2858,6 @@
 
         console.log('[UOOC助手] 找到头部元素:', head.tagName, head.className || head.id);
 
-        // 避免重复添加
-        if (document.getElementById('checkbox-container')) {
-            console.log('[UOOC助手] UI组件已存在，跳过添加');
-            return true;
-        }
 
         // 创建包裹容器（用于包裹head的原有内容）
         let headContent = document.createElement('div');
@@ -3413,7 +3404,8 @@
             console.log('[UOOC助手-AI] 检测到测评页面 (iframe 或 /exam URL)');
             // 在测评页面放置UI组件 (数学考试页面无视频播放器，无 .learn-head 会使用 fallback)
             setTimeout(function() {
-                var placed = placeComponents();
+                var placed = false;
+                try { placed = placeComponents(); } catch (e) { console.error('[UOOC助手] 界面放置出错（看门狗会兜底重试）:', e); }
                 if (placed) {
                     showQuizPageHint();
                     // 新增：如果自动LLM答题已启用，立即开始答题轮询
@@ -3459,9 +3451,18 @@
 
             if (head) {
                 console.log('[UOOC助手] 找到头部元素，开始放置组件');
-                var uiSuccess = placeComponents();
-                if (uiSuccess) {
-                    bindChapterChange();
+                var uiSuccess = false;
+                try {
+                    uiSuccess = placeComponents();
+                    if (uiSuccess) bindChapterChange();
+                } catch (e) {
+                    console.error('[UOOC助手] 放置界面/绑定章节出错（界面看门狗会兜底重试）:', e);
+                }
+                // ⚠️ 下面这段【不能】用 if (uiSuccess) 包住: 以前一旦 placeComponents 抛异常,
+                // 整条初始化链就断在这里 —— 连 start() 都执行不到, 于是 3 秒轮询/连播/答题
+                // 全部不工作; 而脚本底部那个独立的 2x 倍速模块照常运行, 表现就是
+                // "功能还在、界面没了, 必须刷新"。界面本身改由独立看门狗兜底。
+                {
 
                     function ready() {
                         console.log('[UOOC助手] UOOC assistant beta has initialized.');
@@ -3615,6 +3616,25 @@
 
     // 延迟应用2倍速（等待视频元素加载）
     setTimeout(applyToAllVideos, 1000);
+
+    // ==================== 界面看门狗 (独立于 init) ====================
+    // 为什么必须独立: init() 里若 placeComponents()/bindChapterChange() 抛异常,
+    // 整条初始化链会断掉(连 start() 都执行不到), 而那之后底部那个 2x 倍速模块仍然照常工作
+    // —— 这正是"功能还在、界面没了、必须刷新"的来源。看门狗挂在顶层, init 走没走完它都在。
+    if (!window.__uoocUiWatchdog) {
+        window.__uoocUiWatchdog = setInterval(function() {
+            try {
+                if (document.getElementById('checkbox-container')) return; // 界面在, 不打扰
+                if (!window.__uoocUiWatchdogAt || Date.now() - window.__uoocUiWatchdogAt > 3000) {
+                    window.__uoocUiWatchdogAt = Date.now();
+                    console.log('[UOOC助手] 看门狗: 界面上找不到 UI 组件，正在重新放置...');
+                    placeComponents();
+                }
+            } catch (e) {
+                console.warn('[UOOC助手] 看门狗重新放置界面失败:', e);
+            }
+        }, 2000);
+    }
 
     // ==================== 初始化 ====================
 
