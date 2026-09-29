@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.9.4
+// @version      2.9.7
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.9.4 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.9.7 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1984,9 +1984,97 @@
         }
         pr += '\n请以选课学生的身份，写 ' + count + ' 条全新的讨论发言。要求：\n';
         pr += '每条 1-2 句话，口语化，像学生随口打的字；\n';
-        pr += '每条都要有新的信息量：比如举一个具体的函数或数列例子、强调左右极限分别存在且相等的前提、指出某个容易忽略的特殊情况等；\n';
-        pr += '各条切入角度明显不同；禁止出现"首先""其次""总之""综上""作为一名大学生"等套话，禁止分点列表。\n';
-        pr += '按格式返回（每行一条，不要多余解释）：\n1. 发言\n2. 发言\n3. 发言';
+        pr += '\n【最重要】这 ' + count + ' 条必须分别用【完全不同的切入角度】，一条一个，不许重复：\n';
+        pr += '  ① 举一个具体的例子或反例来佐证；\n';
+        pr += '  ② 强调它成立需要的前提 / 条件；\n';
+        pr += '  ③ 指出一个常见误解或容易踩的坑；\n';
+        pr += '  ④ 把它和相近的概念区分开（容易被跟什么搞混）；\n';
+        pr += '  ⑤ 说清它不是什么（排除别人常加的多余理解）；\n';
+        pr += '  ⑥ 从做题 / 考试 / 实际应用的角度说一句。\n';
+        pr += '每行先写你用的角度编号再写内容，格式就是「① 内容」这样。\n';
+        pr += '按格式返回（每行一条，不要多余解释）：\n';
+        var MARK = ['①','②','③','④','⑤','⑥','⑦','⑧','⑨','⑩'];
+        for (var k = 1; k <= count; k++) pr += k + '. ' + MARK[(k - 1) % 10] + ' 发言内容\n';
+        return pr;
+    }
+
+    // 两条发言的相似度（0~1）：最长公共连续片段 ÷ 较短那条的长度
+    function replySimilarity(a, b) {
+        var x = String(a || '').replace(/\s/g, '');
+        var y = String(b || '').replace(/\s/g, '');
+        if (!x || !y) return 0;
+        return longestCommonRun(x, y) / Math.max(1, Math.min(x.length, y.length));
+    }
+
+    function maxSimToExisting(t, existing) {
+        var m = 0;
+        (existing || []).forEach(function(e) {
+            var s = replySimilarity(t, e);
+            if (s > m) m = s;
+        });
+        return m;
+    }
+
+    // 单条评分：越不像已有发言分越高；长度适中（20~90 字）略加分，太短扣分
+    function scoreReply(t, existing) {
+        var novelty = 1 - maxSimToExisting(t, existing);
+        var len = String(t).length;
+        var lenScore = (len >= 20 && len <= 90) ? 0.15 : (len < 12 ? -0.3 : 0);
+        return novelty + lenScore;
+    }
+
+    // 从一批候选里挑出 want 条"最不雷同"的：
+    //   【能力边界】这一步靠字符串相似度，只能合并【字面近似】的候选；
+    //   “意思一样但换了说法”（角度雷同）它抓不住 —— 那类只能靠提示词强制每条
+    //   用不同角度来解决（见 buildDiscussPrompt），这里不假装能识别语义。
+    //   ① 聚合：彼此太像的归成一簇（相似度 ≥ 0.45），每簇只留一条代表
+    //   ② 评分：跟已有发言越不像分越高
+    //   ③ 随机抽样：同分之间随机排序，避免每次挑出来的都一样
+    // 这一步专门解决"角度雷同"：模型往往一次给你三条一个意思的话，
+    // 直接发出去就变成刷屏，这里先把它们合并成一条代表、再按新颖度取前 N。
+    function pickBestReplies(cands, existing, want) {
+        var list = (cands || []).filter(function(t) {
+            return t && String(t).trim().length > 5 && !isDuplicateReply(t, existing);
+        });
+        var clusters = [];
+        list.forEach(function(t) {
+            for (var i = 0; i < clusters.length; i++) {
+                if (replySimilarity(t, clusters[i][0]) >= 0.45) { clusters[i].push(t); return; }
+            }
+            clusters.push([t]);
+        });
+        // 每簇里挑"跟已有发言最不像"的那条当代表
+        var reps = clusters.map(function(c) {
+            return c.slice().sort(function(a, b) {
+                return maxSimToExisting(a, existing) - maxSimToExisting(b, existing);
+            })[0];
+        });
+        var scored = reps.map(function(t) {
+            return { t: t, s: scoreReply(t, existing), r: Math.random() };
+        });
+        scored.sort(function(a, b) { return (b.s - a.s) || (a.r - b.r); });
+        var out = scored.slice(0, want).map(function(o) { return o.t; });
+        console.log('[UOOC助手-讨论] 候选评分 ' + JSON.stringify(scored.slice(0, 6).map(function(o) {
+            return { 分: Math.round(o.s * 100) / 100, 文: String(o.t).slice(0, 16) };
+        })));
+        return out;
+    }
+
+    // 候选不够时：让模型把现有草稿"融合重写"成 want 条互不雷同的新发言
+    function buildFusePrompt(topic, existing, seeds, want) {
+        var pr = '这门课的讨论区话题是：' + topic + '\n';
+        if (existing.length > 0) {
+            pr += '\n已有人发过的发言（务必避开，不要换汤不换药）：\n';
+            existing.slice(0, 8).forEach(function(t, i) { pr += (i + 1) + '. ' + String(t).substring(0, 60) + '\n'; });
+        }
+        pr += '\n下面是我已经写好的 ' + seeds.length + ' 条草稿（角度不够分散）：\n';
+        seeds.forEach(function(t, i) { pr += (i + 1) + '. ' + t + '\n'; });
+        pr += '\n请把它们【融合重写成 ' + want + ' 条】全新的短发言：保留其中有价值的具体点' +
+              '（具体例子、前提条件、容易忽略的特殊情况），但每条之间必须有明显不同的切入角度，' +
+              '并且都不能与上面"已有人发过的"雷同。\n';
+        pr += '这 ' + want + ' 条之间同样必须【一条一个不同角度】（举例 / 前提条件 / 易错点 / 与相近概念区分 / 它不是什么）。\n';
+        pr += '每条 1-2 句话、口语化，不要套话、不要分点列表。按格式返回（每行一条，不要多余解释）：\n';
+        for (var k = 1; k <= want; k++) pr += k + '. 发言\n';
         return pr;
     }
 
@@ -1994,7 +2082,11 @@
         var out = [];
         var lines = String(resp || '').split('\n');
         var strip = function(t) {
-            return t.replace(/\*\*/g, '').replace(/^["“]|["”]$/g, '').replace(/^[-*•·]\s*/, '').trim();
+            return t.replace(/\*\*/g, '')                        // 去掉加粗标记
+                    .replace(/^["“]|["”]$/g, '')              // 去掉首尾引号
+                    .replace(/^[-*•·]\s*/, '')               // 去掉项目符号
+                    .replace(/^[①-⑩]\s*/, '')               // 去掉行首的角度编号
+                    .trim();
         };
         lines.forEach(function(line) {
             var t = line.trim();
@@ -2019,12 +2111,18 @@
         return out;
     }
 
-    function callLLMText(prompt) {
+    // 带超时的 LLM 文本调用。
+    // 【为什么必须加超时】原来这个 fetch 没有任何超时：接口不返回时 Promise 永不落地，
+    // 整条讨论清扫就永远卡在等它 —— 界面上表现为"停在'正在让 AI 生成…'几百秒不动"。
+    function callLLMText(prompt, timeoutMs, opts) {
         var config = LLMConfig.get();
         if (!config || !config.baseUrl || !config.apiKey) {
             return Promise.reject(new Error('请先点击⚙️配置 AI API'));
         }
-        return fetch(config.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+        var limit = timeoutMs || 60000;
+        var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+        var timer = null;
+        var req = fetch(config.baseUrl.replace(/\/*$/, '') + '/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config.apiKey },
             body: JSON.stringify({
@@ -2033,14 +2131,30 @@
                     { role: 'system', content: '你是一个在网络讨论区发言的在校大学生，说话口语化、简短、有个人观点。' },
                     { role: 'user', content: prompt }
                 ],
-                temperature: 0.9,
-                max_tokens: 600
-            })
+                temperature: (opts && opts.temperature != null) ? opts.temperature : 0.9,
+                max_tokens: (opts && opts.maxTokens) || 600
+            }),
+            signal: ctrl ? ctrl.signal : undefined
         }).then(function(r) {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
         }).then(function(d) {
             return (d.choices[0].message.content || '').trim();
+        });
+        var guard = new Promise(function(_, reject) {
+            timer = setTimeout(function() {
+                try { if (ctrl) ctrl.abort(); } catch (e) {}
+                var e = new Error('AI 请求超时（' + Math.round(limit / 1000) + ' 秒无响应）');
+                e.name = 'TimeoutError';
+                reject(e);
+            }, limit);
+        });
+        return Promise.race([req, guard]).then(function(v) {
+            if (timer) clearTimeout(timer);
+            return v;
+        }, function(e) {
+            if (timer) clearTimeout(timer);
+            throw e;
         });
     }
 
@@ -2166,7 +2280,10 @@
         if (st) st.textContent = window.__uoocSweepStatus || '';
         if (ago) {
             var parts = [];
-            if (window.__uoocSweepNextAt && window.__uoocSweepNextAt > Date.now()) {
+            if (window.__uoocSweepGenAt) {
+                // 等 AI 返回期间显示已等秒数（有上限，超时会被中止）
+                parts.push('⏳ 已等 ' + Math.round((Date.now() - window.__uoocSweepGenAt) / 1000) + ' 秒（上限 60 秒）');
+            } else if (window.__uoocSweepNextAt && window.__uoocSweepNextAt > Date.now()) {
                 parts.push('下一条还有 ' + Math.ceil((window.__uoocSweepNextAt - Date.now()) / 1000) + ' 秒');
             } else if (window.__uoocSweepTouchedAt) {
                 parts.push('上次动作 ' + Math.round((Date.now() - window.__uoocSweepTouchedAt) / 1000) + ' 秒前');
@@ -2197,6 +2314,7 @@
         var n = window.__uoocSweepPosted || 0;
         console.log('[UOOC助手-讨论] ' + (msg || '讨论清扫结束') + '，本次共处理 ' + n + ' 个讨论');
         window.__uoocSweepNextAt = 0;
+        window.__uoocSweepGenAt = 0;
         touchSweepPanel('已结束：本次共处理 ' + n + ' 个讨论');
         setTimeout(function() {
             var p = document.getElementById('uooc-sweep-panel');
@@ -2339,21 +2457,44 @@
             touchSweepPanel('话题：' + topic.substring(0, 20) + '…（' +
                             (hdr !== null ? '服务端记 ' + hdr + ' 条回复' : '已有 ' + existing.length + ' 条发言') + '）');
         }
-        var prompt = buildDiscussPrompt(topic, existing, 3);
-        if (window.__uoocDiscussSweep) touchSweepPanel('正在让 AI 生成 3 条发言…（约几秒）');
+        var WANT = 3;          // 最终要发的条数
+        var CAND = 6;          // 先多要一点候选，再挑（角度雷同的会被聚合掉）
+        var prompt = buildDiscussPrompt(topic, existing, CAND);
+        if (window.__uoocDiscussSweep) {
+            window.__uoocSweepGenAt = Date.now();
+            touchSweepPanel('正在让 AI 生成 ' + CAND + ' 条候选发言…（超时上限 60 秒）');
+        }
 
-        callLLMText(prompt).then(function(resp) {
-            var parsed = parseNumberedReplies(resp, 3);
+        callLLMText(prompt, 60000, { temperature: 0.95 }).then(function(resp) {
+            if (window.__uoocDiscussSweep) window.__uoocSweepGenAt = 0;
+            var parsed = parseNumberedReplies(resp, CAND);
             if (parsed.length === 0) {
                 // 解析不出来 ≠ 内容重复 —— 分开报，免得把"格式不对"当"重复"直接跳过整个讨论
                 console.log('[UOOC助手-讨论] ⚠️ AI 返回内容解析不出条目，原文前 200 字:', String(resp || '').slice(0, 200));
                 if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
             }
-            var fresh = parsed.filter(function(r) {
-                return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
-            });
+            // 聚合 → 评分 → 抽样：把"一个意思说三遍"的候选合并，再按新颖度取前 3 条
+            var picked = pickBestReplies(parsed, existing, WANT);
             console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
-                        parsed.length + ' 条 → 去重后剩 ' + fresh.length + ' 条');
+                        parsed.length + ' 条 → 聚合评分后选出 ' + picked.length + ' 条');
+            if (picked.length < WANT) {
+                // 不够就"融合重写"一次，仍然不够就拿现有的顶上
+                if (window.__uoocDiscussSweep) touchSweepPanel('候选角度太少，正在融合重写…');
+                var fuse = buildFusePrompt(topic, existing, (picked.length ? picked : parsed).slice(0, 5), WANT);
+                return callLLMText(fuse, 60000, { temperature: 0.95 }).then(function(resp2) {
+                    var again = pickBestReplies(parseNumberedReplies(resp2, CAND), existing, WANT);
+                    console.log('[UOOC助手-讨论] 融合后得到 ' + again.length + ' 条');
+                    return again.length > picked.length ? again : picked;
+                }).catch(function(e) {
+                    console.log('[UOOC助手-讨论] 融合失败(' + e.message + ')，就用已有的 ' + picked.length + ' 条');
+                    return picked;
+                });
+            }
+            return picked;
+        }).then(function(fresh) {
+            // 到这里生成阶段已结束（成功/融合/失败都要把"生成中"标记清掉）
+            if (window.__uoocDiscussSweep) window.__uoocSweepGenAt = 0;
+            fresh = fresh || [];
             if (fresh.length === 0) {
                 if (window.__uoocDiscussSweep) touchSweepPanel('生成的发言与已有内容雷同，换角度重写…');
                 console.log('[UOOC助手-讨论] 生成 ' + parsed.length + ' 条，全部被判为与已有 ' + existing.length +
@@ -3040,7 +3181,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.4';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.7';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
