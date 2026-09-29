@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.6.1
-// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
+// @version      2.7.0
+// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
 // @include      https://www.uooc.net.cn/home/course/exam/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.6.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.7.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1191,23 +1191,66 @@
                     return;
                 }
                 submitBtn.click();
-                var tries = 10;
-                var timer = setInterval(function() {
-                    tries--;
+                console.log('[UOOC助手-AI] 已点击提交试卷，监控提交结果...');
+                // 提交后可能出现四种情况: ①确认弹层 ②阿里云智能验证 ③直接提交成功 ④页面跳走(答题页消失)
+                // 智能验证 = 行为风控 (鼠标轨迹/环境指纹/服务端评分), 无法程序化绕过
+                //   → 暂停并提醒本人手动完成, 完成后脚本自动继续连播
+                var watchTries = 300; // 最长 5 分钟 (含人工验证时间)
+                var captchaNotified = false;
+                var submitWatch = setInterval(function() {
+                    watchTries--;
+                    // 每轮重新定位答题页: 提交成功后 iframe 会跳转(queContainer 消失)或整个移除
+                    var liveExam = findExamIframeDoc();
+                    var liveDoc = liveExam ? liveExam.doc : null;
+                    // ④ 答题页已消失 → 视为提交完成
+                    if (!liveDoc) {
+                        clearInterval(submitWatch);
+                        window.__uoocExamSubmitted = true;
+                        console.log('[UOOC助手-AI] ✅ 答题页已关闭，视为提交完成');
+                        return;
+                    }
+                    // ① 确认弹层 → 点确定 (layer 可能挂在 iframe 内, 也可能挂在顶层文档)
                     var okBtn = null;
-                    var layerBtns = exam.doc.querySelectorAll('.layui-layer-btn a, .layui-layer button');
+                    var layerBtns = liveDoc.querySelectorAll('.layui-layer-btn a, .layui-layer button');
+                    if (!layerBtns.length) layerBtns = document.querySelectorAll('.layui-layer-btn a, .layui-layer button');
                     for (var k = 0; k < layerBtns.length; k++) {
                         var t = (layerBtns[k].innerText || '').trim();
                         if (t.indexOf('确定') >= 0 || t.indexOf('确认') >= 0) { okBtn = layerBtns[k]; break; }
                     }
                     if (okBtn) {
-                        clearInterval(timer);
                         okBtn.click();
+                        console.log('[UOOC助手-AI] 已点击确认弹层');
+                        return; // 继续观察提交结果
+                    }
+                    // ② 智能验证弹出 → 提醒人工完成 (只提醒一次), 持续等待
+                    var cap = document.getElementById('aliyunCaptcha-window-embed') || liveDoc.getElementById('aliyunCaptcha-window-embed');
+                    var capVisible = false, capHasIframe = false;
+                    if (cap) {
+                        var rect = cap.getBoundingClientRect();
+                        capVisible = rect.width > 50 && rect.height > 30;
+                        capHasIframe = !!cap.querySelector('iframe');
+                    }
+                    if (capVisible && capHasIframe) {
+                        if (!captchaNotified) {
+                            captchaNotified = true;
+                            console.log('[UOOC助手-AI] ⚠️ 智能验证已弹出，请手动完成验证，完成后自动继续');
+                            try {
+                                GM_notification({ text: '提交试卷弹出智能验证，请到页面手动完成验证', title: 'UOOC 助手' });
+                            } catch (e) {}
+                            if (!window.__uoocSilentAnswer) alert('提交试卷时弹出了智能验证\n\n请在页面上手动完成验证\n\n完成后脚本会自动继续');
+                        }
+                        return; // 等人工解验证
+                    }
+                    // ③ 提交成功判定: "提交试卷"按钮已从答题页消失
+                    if (!findButtonByText(liveDoc, '提交试卷')) {
+                        clearInterval(submitWatch);
                         window.__uoocExamSubmitted = true;
-                        console.log('[UOOC助手-AI] ✅ 试卷已自动提交');
-                    } else if (tries <= 0) {
-                        clearInterval(timer);
-                        console.log('[UOOC助手-AI] 未检测到确认弹层（可能未直接弹出）');
+                        console.log('[UOOC助手-AI] ✅ 试卷已提交');
+                        return;
+                    }
+                    if (watchTries <= 0) {
+                        clearInterval(submitWatch);
+                        console.log('[UOOC助手-AI] 提交监控超时（5分钟），请手动确认提交状态');
                     }
                 }, 1000);
                 return;
@@ -2521,7 +2564,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.6.1';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.0';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
