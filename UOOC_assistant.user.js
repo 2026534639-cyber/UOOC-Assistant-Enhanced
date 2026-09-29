@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.9.3
+// @version      2.9.4
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.9.3 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.9.4 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1931,20 +1931,46 @@
         return out;
     }
 
-    // 粗查重复: 新发言的任一 10 字片段出现在已有发言里 → 判定为重复
+    // 最长公共连续片段长度（判断"两句话有多像"）
+    function longestCommonRun(a, b) {
+        if (!a || !b) return 0;
+        var best = 0;
+        var prev = new Array(b.length + 1);
+        for (var k = 0; k <= b.length; k++) prev[k] = 0;
+        for (var i = 1; i <= a.length; i++) {
+            var cur = new Array(b.length + 1);
+            cur[0] = 0;
+            for (var j = 1; j <= b.length; j++) {
+                if (a.charCodeAt(i - 1) === b.charCodeAt(j - 1)) {
+                    cur[j] = prev[j - 1] + 1;
+                    if (cur[j] > best) best = cur[j];
+                } else {
+                    cur[j] = 0;
+                }
+            }
+            prev = cur;
+        }
+        return best;
+    }
+
+    // 判定"新发言跟已有发言太像"。
+    // 【旧判据的坑】原来是"新发言里任意 10 字片段出现在任一已有发言里 → 算重复"。
+    // 在回复动辄上百条的讨论里这几乎必然误判：话题窄、用词重复，10 字片段太容易重合，
+    // 结果 3 条发言全被判雷同 → 整个讨论被跳过 → 一条都没发出去
+    // （表现就是"点了自动讨论，可是并没有真的讨论"）。
+    // 改为相似度判据：最长公共连续片段要达到「14 字」且「新句长度的 55%」才算重复。
     function isDuplicateReply(newText, existingTexts) {
         var n = String(newText || '').replace(/\s/g, '');
         if (n.length < 6) return true;
         for (var i = 0; i < existingTexts.length; i++) {
             var e = String(existingTexts[i] || '').replace(/\s/g, '');
             if (!e) continue;
-            if (n.length >= 10) {
-                for (var j = 0; j + 10 <= n.length; j += 5) {
-                    if (e.indexOf(n.substring(j, j + 10)) >= 0) return true;
-                }
-            } else if (e.indexOf(n) >= 0) {
-                return true;
+            if (n.length < 12) {
+                if (e.indexOf(n) >= 0) return true;   // 短句：整句被包含才算
+                continue;
             }
+            var run = longestCommonRun(n, e);
+            if (run >= Math.max(14, Math.floor(n.length * 0.55))) return true;
         }
         return false;
     }
@@ -1966,13 +1992,30 @@
 
     function parseNumberedReplies(resp, max) {
         var out = [];
-        String(resp || '').split('\n').forEach(function(line) {
-            var m = line.trim().match(/^(\d+)[.、:：)]\s*(.+)$/);
-            if (m && m[2].length > 5) {
-                var t = m[2].replace(/\*/g, '').trim();
-                if (out.length < max) out.push(t);
+        var lines = String(resp || '').split('\n');
+        var strip = function(t) {
+            return t.replace(/\*\*/g, '').replace(/^["“]|["”]$/g, '').replace(/^[-*•·]\s*/, '').trim();
+        };
+        lines.forEach(function(line) {
+            var t = line.trim();
+            // 支持 1. / 1、 / 1: / 1） / (1) / ① 等写法
+            var m = t.match(/^\(?(\d+)\s*[.、:：)）]\s*(.+)$/) || t.match(/^[①②③④⑤⑥⑦⑧⑨⑩]\s*(.+)$/);
+            if (m) {
+                var body = strip(m[2] || m[1] || '');
+                if (body.length > 5 && out.length < max) out.push(body);
             }
         });
+        if (out.length === 0) {
+            // 兜底: 模型没给编号时, 取"像正文的行"（够长、不是开头说明/要求之类）
+            lines.forEach(function(line) {
+                var t = strip(line);
+                if (out.length >= max) return;
+                if (t.length < 12 || t.length > 200) return;
+                if (/^(以下|注意|说明|要求|输出|格式|回答|发言如下)/.test(t)) return;
+                out.push(t);
+            });
+            if (out.length > 0) console.log('[UOOC助手-讨论] AI 没按编号返回，已按正文行兜底解析出 ' + out.length + ' 条');
+        }
         return out;
     }
 
@@ -2300,12 +2343,21 @@
         if (window.__uoocDiscussSweep) touchSweepPanel('正在让 AI 生成 3 条发言…（约几秒）');
 
         callLLMText(prompt).then(function(resp) {
-            var fresh = parseNumberedReplies(resp, 3).filter(function(r) {
+            var parsed = parseNumberedReplies(resp, 3);
+            if (parsed.length === 0) {
+                // 解析不出来 ≠ 内容重复 —— 分开报，免得把"格式不对"当"重复"直接跳过整个讨论
+                console.log('[UOOC助手-讨论] ⚠️ AI 返回内容解析不出条目，原文前 200 字:', String(resp || '').slice(0, 200));
+                if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
+            }
+            var fresh = parsed.filter(function(r) {
                 return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
             });
+            console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
+                        parsed.length + ' 条 → 去重后剩 ' + fresh.length + ' 条');
             if (fresh.length === 0) {
-                if (window.__uoocDiscussSweep) touchSweepPanel('生成的发言与已有内容重复，换角度重写…');
-                console.log('[UOOC助手-讨论] 生成内容与已有发言重复，跳过该讨论继续连播');
+                if (window.__uoocDiscussSweep) touchSweepPanel('生成的发言与已有内容雷同，换角度重写…');
+                console.log('[UOOC助手-讨论] 生成 ' + parsed.length + ' 条，全部被判为与已有 ' + existing.length +
+                            ' 条发言雷同，跳过该讨论继续连播');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
                 window.__uoocLastForwardClick = Date.now();
@@ -2341,7 +2393,10 @@
                                 touchSweepPanel('✅ 第 ' + (i + 1) + '/' + fresh.length + ' 条已确认提交');
                             } else {
                                 touchSweepPanel('⚠️ 第 ' + (i + 1) + '/' + fresh.length + ' 条点了回复，但没看到新发言（可能被拦截或需人机验证）');
-                                console.log('[UOOC助手-讨论] ⚠️ 第' + (i + 1) + '条未确认提交，请手动检查');
+                                console.log('[UOOC助手-讨论] ⚠️ 第' + (i + 1) + '条未确认提交。' +
+                                            '注意: 优课提交回复的代码【没有错误处理】，请求失败是静默的 —— ' +
+                                            '若控制台同时出现 $http 报错 / 上面有 layer 提示语，那才是真正原因。' +
+                                            '该讨论服务端回复数=' + getReplyCountFromHeader());
                             }
                         });
                     }
@@ -2985,7 +3040,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.3';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.4';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
