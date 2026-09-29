@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.5.0
+// @version      2.6.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.5.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.6.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1711,6 +1711,67 @@
         return null;
     }
 
+    // 收集讨论区已有发言 (用于去重: 同质化发言会被优课 AI 审查标记)
+    function getExistingReplies() {
+        const seen = new Set();
+        const out = [];
+        document.querySelectorAll('div, p, li').forEach(function(el) {
+            if (el.children.length > 0) return;
+            const t = (el.innerText || '').trim();
+            if (t.length < 15 || t.length > 300) return;
+            if (t.indexOf('登录') >= 0 || t.indexOf('账号') >= 0 || t.indexOf('访问文件') >= 0 || t.indexOf('AI将根据') >= 0) return;
+            if (seen.has(t)) return;
+            seen.add(t);
+            out.push(t);
+        });
+        return out;
+    }
+
+    // 粗查重复: 新发言的任一 10 字片段出现在已有发言里 → 判定为重复
+    function isDuplicateReply(newText, existingTexts) {
+        var n = String(newText || '').replace(/\s/g, '');
+        if (n.length < 6) return true;
+        for (var i = 0; i < existingTexts.length; i++) {
+            var e = String(existingTexts[i] || '').replace(/\s/g, '');
+            if (!e) continue;
+            if (n.length >= 10) {
+                for (var j = 0; j + 10 <= n.length; j += 5) {
+                    if (e.indexOf(n.substring(j, j + 10)) >= 0) return true;
+                }
+            } else if (e.indexOf(n) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 构造带已有发言上下文的提示词 (让 AI 避开重复观点)
+    function buildDiscussPrompt(topic, existing, count) {
+        var pr = '这门课的讨论区话题是：' + topic + '\n';
+        if (existing.length > 0) {
+            pr += '\n讨论区已有人发过的发言（务必避开这些观点和表述，不要换汤不换药）：\n';
+            existing.slice(0, 8).forEach(function(t, i) { pr += (i + 1) + '. ' + t.substring(0, 60) + '\n'; });
+        }
+        pr += '\n请以选课学生的身份，写 ' + count + ' 条全新的讨论发言。要求：\n';
+        pr += '每条 1-2 句话，口语化，像学生随口打的字；\n';
+        pr += '每条都要有新的信息量：比如举一个具体的函数或数列例子、强调左右极限分别存在且相等的前提、指出某个容易忽略的特殊情况等；\n';
+        pr += '各条切入角度明显不同；禁止出现"首先""其次""总之""综上""作为一名大学生"等套话，禁止分点列表。\n';
+        pr += '按格式返回（每行一条，不要多余解释）：\n1. 发言\n2. 发言\n3. 发言';
+        return pr;
+    }
+
+    function parseNumberedReplies(resp, max) {
+        var out = [];
+        String(resp || '').split('\n').forEach(function(line) {
+            var m = line.trim().match(/^(\d+)[.、:：)]\s*(.+)$/);
+            if (m && m[2].length > 5) {
+                var t = m[2].replace(/\*/g, '').trim();
+                if (out.length < max) out.push(t);
+            }
+        });
+        return out;
+    }
+
     function callLLMText(prompt) {
         var config = LLMConfig.get();
         if (!config || !config.baseUrl || !config.apiKey) {
@@ -1769,43 +1830,46 @@
             alert('没有识别到讨论话题，请先打开一个"讨论"页面再点本按钮');
             return;
         }
+        var existing = getExistingReplies();
         var count = 3;
-        if (!window.confirm('检测到讨论话题：\n\n' + topic.substring(0, 150) + '\n\n将自动发布 ' + count + ' 条不同角度的简短发言（每条 1-2 句）。\n\n优课会用 AI 评估发言，已按学生口吻生成，但仍建议发布后自己看一眼。确定执行？')) return;
+        var ask = '检测到讨论话题：\n\n' + topic.substring(0, 150) + '\n\n讨论区已有 ' + existing.length + ' 条发言（新发言会自动避开它们的观点）。\n将自动发布 ' + count + ' 条不同角度的简短发言（每条 1-2 句）。\n注意：优课会用 AI 评估发言质量。确定执行？';
+        if (!window.confirm(ask)) return;
 
-        var prompt = '这门课的讨论区话题是：' + topic + '\n\n请以选课学生的身份，从3个不同角度各写一条讨论发言。要求：每条1-2句话；口语化、像学生随口打的字；直接给出观点和理由；可以用第一人称；禁止出现"首先""其次""总之""综上""作为一名大学生"等套话；禁止分点和列表；三条的切入角度要明显不同。按格式返回（每行一条）：\n1. 发言内容\n2. 发言内容\n3. 发言内容';
-
-        callLLMText(prompt).then(function(resp) {
-            var replies = [];
-            resp.split('\n').forEach(function(line) {
-                var m = line.trim().match(/^(\d+)[.、:：)]\s*(.+)$/);
-                if (m && m[2].length > 5) replies.push(m[2].replace(/\*/g, '').trim());
-            });
-            if (replies.length === 0) {
-                alert('AI 返回格式解析失败：\n' + resp.substring(0, 200));
-                return;
-            }
-            if (replies.length > count) replies = replies.slice(0, count);
-
-            console.log('[UOOC助手-讨论] 生成 ' + replies.length + ' 条发言，开始逐条发布');
+        var prompt = buildDiscussPrompt(topic, existing, count);
+        function startPosting(list) {
+            console.log('[UOOC助手-讨论] 生成 ' + list.length + ' 条不重复发言，开始逐条发布');
             var i = 0;
             function postNext() {
-                if (i >= replies.length) {
-                    console.log('[UOOC助手-讨论] 全部发布完成');
-                    return;
-                }
-                var ok = postDiscussionReply(replies[i]);
+                if (i >= list.length) { alert('✅ 自动讨论完成，已发布 ' + list.length + ' 条发言'); return; }
+                var ok = postDiscussionReply(list[i]);
                 if (ok) {
-                    console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', replies[i]);
+                    console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', list[i]);
                     i++;
-                    setTimeout(postNext, 6000 + Math.floor(Math.random() * 6000)); // 随机 6~12 秒
+                    setTimeout(postNext, 6000 + Math.floor(Math.random() * 6000));
                 } else {
-                    console.log('[UOOC助手-讨论] 编辑器不可用，发布中止');
+                    alert('编辑器不可用，发布中止');
                 }
             }
             postNext();
-        }).catch(function(e) {
-            alert('AI 调用失败: ' + e.message);
-        });
+        }
+
+        callLLMText(prompt).then(function(resp) {
+            var fresh = parseNumberedReplies(resp, count).filter(function(r) {
+                return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
+            });
+            if (fresh.length === 0) {
+                var prompt2 = prompt + '\n\n注意：你上次生成的发言与已有发言重复了。这次必须给出全新的信息量（举具体函数/数列例子、左右极限分别考虑、或指出容易忽略的特殊情况）。';
+                callLLMText(prompt2).then(function(resp2) {
+                    var fresh2 = parseNumberedReplies(resp2, count).filter(function(r) {
+                        return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
+                    });
+                    if (fresh2.length === 0) { alert('AI 生成的发言与已有发言重复，已取消发布。请稍后再试或手动发言'); return; }
+                    startPosting(fresh2);
+                }).catch(function(e) { alert('AI 调用失败: ' + e.message); });
+            } else {
+                startPosting(fresh);
+            }
+        }).catch(function(e) { alert('AI 调用失败: ' + e.message); });
     }
 
     // ==================== 连播遇测验：自动完成流程 ====================
@@ -1842,45 +1906,41 @@
             console.log('[UOOC助手] 连播已取消，停止讨论自动发布');
             return;
         }
-
         var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
         var ue = (typeof getUeditorInstance === 'function') ? getUeditorInstance() : null;
         if (!topic || !ue) {
             // 页面还在加载 → 等待; 超时 → 跳过该讨论继续连播 (讨论不挡视频)
             if (attempts > 0) { setTimeout(() => autoDiscussContinueFlow(attempts - 1), 2000); return; }
             console.log('[UOOC助手] 讨论页未就绪，跳过继续连播');
-            window.__uoocNavPending = false;
             window.__uoocSilentAnswer = false;
+            window.__uoocNavPending = false;
             window.__uoocLastForwardClick = Date.now();
             findNextVideo();
             return;
         }
-
         console.log('[UOOC助手] 检测到讨论话题:', topic.substring(0, 60));
         window.__uoocSilentAnswer = true;
-        var prompt = '这门课的讨论区话题是：' + topic + '\n\n请以选课学生的身份，从3个不同角度各写一条讨论发言。要求：每条1-2句话；口语化、像学生随口打的字；直接给出观点和理由；可以用第一人称；禁止出现"首先""其次""总之""综上""作为一名大学生"等套话；禁止分点和列表；三条的切入角度要明显不同。按格式返回（每行一条）：\n1. 发言内容\n2. 发言内容\n3. 发言内容';
+        var existing = getExistingReplies();
+        var prompt = buildDiscussPrompt(topic, existing, 3);
 
         callLLMText(prompt).then(function(resp) {
-            var replies = [];
-            resp.split('\n').forEach(function(line) {
-                var m = line.trim().match(/^(\d+)[.、:：)]\s*(.+)$/);
-                if (m && m[2].length > 5) replies.push(m[2].replace(/\*/g, '').trim());
+            var fresh = parseNumberedReplies(resp, 3).filter(function(r) {
+                return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
             });
-            if (replies.length === 0) {
-                console.log('[UOOC助手-讨论] AI 返回解析失败，跳过该讨论继续连播');
+            if (fresh.length === 0) {
+                console.log('[UOOC助手-讨论] 生成内容与已有发言重复，跳过该讨论继续连播');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
                 window.__uoocLastForwardClick = Date.now();
                 findNextVideo();
                 return;
             }
-
             var i = 0;
             function postNext() {
                 var cb = document.getElementById('continue');
                 if (!cb || !cb.checked) { window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
-                if (i >= replies.length) {
-                    console.log('[UOOC助手-讨论] 本讨论自动发布完成，5 秒后继续连播');
+                if (i >= fresh.length) {
+                    console.log('[UOOC助手-讨论] 本讨论自动发布完成 (' + fresh.length + ' 条)，5 秒后继续连播');
                     setTimeout(function() {
                         window.__uoocSilentAnswer = false;
                         window.__uoocNavPending = false;
@@ -1889,9 +1949,9 @@
                     }, 5000);
                     return;
                 }
-                var ok = postDiscussionReply(replies[i]);
+                var ok = postDiscussionReply(fresh[i]);
                 if (ok) {
-                    console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', replies[i].substring(0, 60));
+                    console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', fresh[i].substring(0, 60));
                     i++;
                     setTimeout(postNext, 6000 + Math.floor(Math.random() * 6000));
                 } else {
@@ -2449,7 +2509,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.5.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.6.0';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
