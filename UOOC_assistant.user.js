@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.7.3
+// @version      2.7.4
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.7.3 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.7.4 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -271,10 +271,17 @@
     function waitCurrentTaskDone(cb) {
         var continueBox = document.getElementById('continue');
         if (!continueBox || !continueBox.checked) { cb(); return; }
-        if (window.__uoocWaitingDone) { console.log('[UOOC助手] 已在等系统确认，忽略重复触发'); return; }
+        if (window.__uoocWaitingDone) return; // 已经在等了(3秒自愈轮询会反复触发), 静默忽略
+        // 上一次"等不到打勾"已经暂停了连播 → 不要再自动往下走, 等用户处理(或重新勾选全自动)
+        if (window.__uoocAutoChainStopped) return;
         window.__uoocWaitingDone = true;
-        var deadline = Date.now() + 120000; // 最多等 2 分钟
-        var ticks = 0, finished = false;
+        var startedAt = Date.now();
+        var deadline = startedAt + 120000; // 最多等 2 分钟
+        var ticks = 0, finished = false, noRowSince = 0;
+        var rate = (typeof getUoocRate === 'function') ? getUoocRate() : 2;
+        var rewinds = 0, lastRewindAt = 0;
+        var secs = function() { return ((Date.now() - startedAt) / 1000).toFixed(1); };
+        // 等到了: 正常往下走
         var finish = function(msg) {
             if (finished) return;
             finished = true;
@@ -282,24 +289,57 @@
             if (msg) console.log(msg);
             cb();
         };
+        // 等不到打勾: 这条观看平台不认, 继续往下切只会白刷一整节 → 停下并显著提醒
+        var abort = function(msg) {
+            if (finished) return;
+            finished = true;
+            window.__uoocWaitingDone = false;
+            console.log(msg);
+            var tip = '这条视频平台没有给打勾（没算你观看）。倍速 ' + rate + 'x。' +
+                      (rate > 2 ? '把倍速调到 2x 重看这条，2x 实测稳定打勾。' : '请手动播放完这条视频再继续。');
+            console.log('[UOOC助手] ' + tip + ' 连播已暂停，避免继续刷不计分的任务');
+            try { GM_notification({ text: tip, title: 'UOOC 助手：连播已暂停' }); } catch (e) {}
+            window.__uoocAutoChainStopped = true;
+            // 不调用 cb() → 连播链条在这里停住; 置标记防止下一条视频播完后又自动接着刷
+        };
         (function poll() {
             if (finished) return;
             var rows = Array.from(document.querySelectorAll('.basic'));
             var cur = rows.find(function(r) { return r.classList.contains('active'); });
             if (!cur) {
-                // 侧栏重渲染期间 active 行会短暂消失 → 继续等
-                if (Date.now() < deadline) { setTimeout(poll, 1500); return; }
-                finish('[UOOC助手] 等不到当前任务行（已等2分钟），继续连播');
+                // 侧栏重渲染期间 active 行会短暂消失 → 继续等;
+                // 但若一直观测不到这一行, 说明等下去也没意义, 别干耗 2 分钟
+                if (!noRowSince) noRowSince = Date.now();
+                if (Date.now() - noRowSince > 8000) { finish('[UOOC助手] 侧栏一直找不到当前任务行，不再等待，继续连播'); return; }
+                setTimeout(poll, 1500);
                 return;
             }
+            noRowSince = 0;
             if (cur.classList.contains('complete')) {
-                finish(ticks > 0 ? '[UOOC助手] ✅ 系统已确认完成（打勾），继续连播' : null);
+                finish(ticks > 0 ? ('[UOOC助手] ✅ 系统已确认完成（打勾），本次等了 ' + secs() + ' 秒') : null);
                 return;
             }
             ticks++;
-            if (ticks === 2) console.log('[UOOC助手] 视频已播完，等待系统确认打勾后再切下一个...');
+            if (ticks === 2) console.log('[UOOC助手] 视频已播完，等待系统确认打勾后再切下一个...（超过 30 秒还不出勾，多半是倍速过高，平台没记这次观看）');
+            if (ticks % 20 === 0) console.log('[UOOC助手] 仍在等系统打勾... 已等 ' + secs() + ' 秒');
+            // 高倍速的"有效停留": 平台对 >2x 的观看时长常常不认, 而单纯停在最后一帧没用
+            // —— 播放位置不再前进, 就产生不了新的观看时长。所以倒回尾部按当前倍速【真实重放】,
+            // 服务端才拿得到新的「位置→结尾」记录; 一旦打勾立刻切下一个。
+            if (rate > 2 && ticks >= 3 && Date.now() - lastRewindAt > 12000) {
+                var cv = getCurrentVideo();
+                if (cv && isFinite(cv.duration) && cv.duration > 5) {
+                    lastRewindAt = Date.now();
+                    rewinds++;
+                    try {
+                        cv.currentTime = cv.duration > 35 ? cv.duration - 30 : 0;
+                        var rp = cv.play();
+                        if (rp && typeof rp.catch === 'function') rp.catch(function() {});
+                        console.log('[UOOC助手] 倍速 ' + rate + 'x 平台还没打勾 → 倒回尾部 30 秒真实重放（第 ' + rewinds + ' 次），打勾后立刻继续连播');
+                    } catch (e) {}
+                }
+            }
             if (Date.now() >= deadline) {
-                finish('[UOOC助手] ⚠️ 等系统确认超时（2分钟）仍未打勾，仍继续连播；若下一个点不开，说明这条视频没被计分');
+                abort('[UOOC助手] ⚠️ 等了 2 分钟、真实重放 ' + rewinds + ' 次仍未打勾');
                 return;
             }
             setTimeout(poll, 1500);
@@ -2404,12 +2444,23 @@
             rateSlider.title = '倍速滑条：2 ~ 4 倍，拖动选择，立即生效';
             var rateLabel = document.createElement('label');
             rateLabel.style = 'margin-left: 4px; font-size: 12px; color: #ffd54a; min-width: 36px; display: inline-block;';
-            rateLabel.innerText = parseFloat(rateSlider.value) + 'x';
+            // 全部任务"打勾"＝平台认可这次观看时长。倍速越高越可能被判无效：
+            // 实测 4x 容易看完不打勾(白刷), 2x 稳定 —— 所以 >2x 就常驻警告
+            var paintRate = function(v) {
+                var risky = v > 2;
+                rateLabel.innerText = v + 'x' + (risky ? ' ⚠' : '');
+                rateLabel.style.color = risky ? '#ff8a65' : '#ffd54a';
+                rateLabel.title = risky
+                    ? ('当前 ' + v + ' 倍速：平台可能不记录本次观看时长（这条视频不会打勾，等于白刷），建议 2 倍速')
+                    : ('当前 ' + v + ' 倍速：平台正常打勾');
+            };
+            paintRate(parseFloat(rateSlider.value));
             rateSlider.oninput = function() {
                 var v = parseFloat(this.value);
                 if (isNaN(v) || v < 1 || v > 4) v = 2;
                 localStorage.setItem('uooc_rate', String(v));
-                rateLabel.innerText = v + 'x';
+                paintRate(v);
+                if (v > 2) console.log('[UOOC助手] 已设为 ' + v + ' 倍速：倍速过高时平台可能不记录观看时长（视频不打勾 = 白刷），2 倍速最稳');
                 if (document.getElementById('rate') && document.getElementById('rate').checked) setVideoRate(v);
             };
             rateCheckbox.appendChild(rateSlider);
@@ -2418,6 +2469,12 @@
             var playCheckbox = getCheckbox('play', '播放');
             var continueCheckbox = getCheckbox('continue', '🚀 全自动');
             continueCheckbox.title = '全自动：看完自动播下一个；测验自动AI作答并提交；讨论自动发布；文本/附件跳过';
+            continueCheckbox.onchange = function() {
+                if (this.checked) {
+                    window.__uoocAutoChainStopped = false;
+                    console.log('[UOOC助手] 全自动已重新勾选，连播恢复');
+                }
+            };
             var copyButton = getCopyButton();
 
             // 创建LLM答题复选框和设置按钮
@@ -2666,7 +2723,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.3';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.4';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -3158,6 +3215,7 @@
                         if (ng.indexOf('goSource') >= 0) {
                             if (isVideo(row)) {
                                 window.__uoocNavPending = false;
+                                window.__uoocAutoChainStopped = false; // 主动前进 = 视为重新开始连播
                                 window.__uoocLastForwardClick = Date.now();
                                 row.click();
                                 start();
