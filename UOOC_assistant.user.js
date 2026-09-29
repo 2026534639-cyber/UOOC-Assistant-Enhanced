@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
+// @version      2.4.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.3.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.4.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1799,6 +1799,86 @@
         return null;
     }
 
+    // ==================== 连播遇讨论：全自动发布流程 ====================
+    // 连播勾选中时: 进入讨论页 → 识别话题 → AI 生成 3 条学生口吻短发言 → 逐条发布 → 继续连播
+    function autoDiscussContinueFlow(attempts) {
+        var continueBox = document.getElementById('continue');
+        if (!continueBox || !continueBox.checked) {
+            window.__uoocSilentAnswer = false;
+            window.__uoocNavPending = false;
+            console.log('[UOOC助手] 连播已取消，停止讨论自动发布');
+            return;
+        }
+
+        var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
+        var ue = (typeof getUeditorInstance === 'function') ? getUeditorInstance() : null;
+        if (!topic || !ue) {
+            // 页面还在加载 → 等待; 超时 → 跳过该讨论继续连播 (讨论不挡视频)
+            if (attempts > 0) { setTimeout(() => autoDiscussContinueFlow(attempts - 1), 2000); return; }
+            console.log('[UOOC助手] 讨论页未就绪，跳过继续连播');
+            window.__uoocNavPending = false;
+            window.__uoocSilentAnswer = false;
+            window.__uoocLastForwardClick = Date.now();
+            findNextVideo();
+            return;
+        }
+
+        console.log('[UOOC助手] 检测到讨论话题:', topic.substring(0, 60));
+        window.__uoocSilentAnswer = true;
+        var prompt = '这门课的讨论区话题是：' + topic + '\n\n请以选课学生的身份，从3个不同角度各写一条讨论发言。要求：每条1-2句话；口语化、像学生随口打的字；直接给出观点和理由；可以用第一人称；禁止出现"首先""其次""总之""综上""作为一名大学生"等套话；禁止分点和列表；三条的切入角度要明显不同。按格式返回（每行一条）：\n1. 发言内容\n2. 发言内容\n3. 发言内容';
+
+        callLLMText(prompt).then(function(resp) {
+            var replies = [];
+            resp.split('\n').forEach(function(line) {
+                var m = line.trim().match(/^(\d+)[.、:：)]\s*(.+)$/);
+                if (m && m[2].length > 5) replies.push(m[2].replace(/\*/g, '').trim());
+            });
+            if (replies.length === 0) {
+                console.log('[UOOC助手-讨论] AI 返回解析失败，跳过该讨论继续连播');
+                window.__uoocSilentAnswer = false;
+                window.__uoocNavPending = false;
+                window.__uoocLastForwardClick = Date.now();
+                findNextVideo();
+                return;
+            }
+
+            var i = 0;
+            function postNext() {
+                var cb = document.getElementById('continue');
+                if (!cb || !cb.checked) { window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
+                if (i >= replies.length) {
+                    console.log('[UOOC助手-讨论] 本讨论自动发布完成，5 秒后继续连播');
+                    setTimeout(function() {
+                        window.__uoocSilentAnswer = false;
+                        window.__uoocNavPending = false;
+                        window.__uoocLastForwardClick = Date.now();
+                        findNextVideo();
+                    }, 5000);
+                    return;
+                }
+                var ok = postDiscussionReply(replies[i]);
+                if (ok) {
+                    console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', replies[i].substring(0, 60));
+                    i++;
+                    setTimeout(postNext, 6000 + Math.floor(Math.random() * 6000));
+                } else {
+                    console.log('[UOOC助手-讨论] 编辑器不可用，跳过继续连播');
+                    window.__uoocSilentAnswer = false;
+                    window.__uoocNavPending = false;
+                    window.__uoocLastForwardClick = Date.now();
+                    findNextVideo();
+                }
+            }
+            postNext();
+        }).catch(function(e) {
+            console.log('[UOOC助手-讨论] AI 调用失败:', e.message, '，跳过该讨论继续连播');
+            window.__uoocSilentAnswer = false;
+            window.__uoocNavPending = false;
+            window.__uoocLastForwardClick = Date.now();
+            findNextVideo();
+        });
+    }
+
     function autoCompleteQuizFlow(attempts) {
         // 连播被取消就停 (用户中途关闭连播 = 接管)
         var continueBox = document.getElementById('continue');
@@ -2100,7 +2180,8 @@
             rateCheckbox.appendChild(rateLabel);
             var volumeCheckbox = getCheckbox('volume', '静音');
             var playCheckbox = getCheckbox('play', '播放');
-            var continueCheckbox = getCheckbox('continue', '连播');
+            var continueCheckbox = getCheckbox('continue', '🚀 全自动');
+            continueCheckbox.title = '全自动：看完自动播下一个；测验自动AI作答并提交；讨论自动发布；文本/附件跳过';
             var copyButton = getCopyButton();
 
             // 创建LLM答题复选框和设置按钮
@@ -2332,7 +2413,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.3.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.4.0';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2707,6 +2788,11 @@
                     var t = node.innerText || '';
                     return t.indexOf('测验') >= 0 || t.indexOf('作业') >= 0 || t.indexOf('考试') >= 0;
                 };
+                let isDiscussionRow = (node) => {
+                    if (!node) return false;
+                    var t = (node.innerText || '').trim();
+                    return t === '讨论' || (t.indexOf('讨论') >= 0 && t.length <= 10);
+                };
                 // 标题文本归一化: 侧栏激活行标题里的空格是不换行空格 (U+00A0),
                 // 点击前后的 innerText 空格种类不同, 不归一化精确匹配永远失败
                 let normLabel = (t) => {
@@ -2806,7 +2892,21 @@
                                 }
                                 return;
                             }
-                            continue; // 讨论/文本/附件: 跳过
+                            if (isDiscussionRow(row)) {
+                                // 连播遇到讨论: 进入并自动发布多条不同角度发言 (静默)
+                                console.log('[UOOC助手] 连播遇到讨论，进入并自动发布');
+                                window.__uoocNavPending = true;
+                                window.__uoocSilentAnswer = true;
+                                row.click();
+                                if (attemptsLeft > 1) {
+                                    setTimeout(() => { autoDiscussContinueFlow(attempts - 1); }, 3000);
+                                } else {
+                                    window.__uoocNavPending = false;
+                                    window.__uoocSilentAnswer = false;
+                                }
+                                return;
+                            }
+                            continue; // 文本/附件: 跳过
                         }
                         // 其他行: 跳过
                     }
