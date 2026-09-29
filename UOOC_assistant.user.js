@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.1.2
+// @version      2.2.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.1.2 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.2.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1162,9 +1162,11 @@
         // 填入答案
         const filledCount = fillAnswers(questions, answers);
         console.log('[UOOC助手-AI] 填充结果: 共填入', filledCount, '个答案，共', questions.length, '道题');
+        window.__uoocLastFillResult = { filled: filledCount, total: questions.length };
 
         // 提示用户检查并提交 (始终附带逐题情况, 部分填入时也能定位漏题原因)
         // 若答题期间用户已切走 (连播推进到别处), 不再弹窗打扰, 只写控制台
+        // 连播的"测验自动完成"流程中 (__uoocSilentAnswer) 也不弹窗
         setTimeout(function() {
             let msg = `✅ AI答题完成！\n\n已自动填入 ${filledCount}/${questions.length} 个答案。`;
             const raw = String(window.__uoocLastLLMResponse || '');
@@ -1175,7 +1177,9 @@
                 msg += `\n\n⚠️ 有题目未填入，"各题情况"里 (HTTP/图片下载失败/异常) 的就是原因。`;
             }
             msg += `\n\n请仔细检查答案后，手动点击"提交试卷"按钮。`;
-            if (isQuizPageVisible()) {
+            if (window.__uoocSilentAnswer) {
+                console.log('[UOOC助手-AI] 连播测验自动完成流程中，静默跳过弹窗:', msg.replace(/\n/g, ' '));
+            } else if (isQuizPageVisible()) {
                 alert(msg);
             } else {
                 console.log('[UOOC助手-AI] 已离开答题页面，答案已填入但不再弹窗:', msg.replace(/\n/g, ' '));
@@ -1602,6 +1606,10 @@
                 clearInterval(llmPoll);
                 return;
             }
+            // 连播的"测验自动完成"流程正在答题时, 轮询让路 (防双重作答)
+            if (window.__uoocAnswerBusy) {
+                return;
+            }
 
             // 检查是否在考试/测评页面 (用"可见性"判断: SPA 切走后残留的隐藏 iframe 不算数)
             var currentUrl = window.location.href;
@@ -1651,6 +1659,101 @@
         // 清理轮询
         window.addEventListener('beforeunload', function() {
             clearInterval(llmPoll);
+        });
+    }
+
+    // ==================== 连播遇测验：自动完成流程 ====================
+    // 连播勾选中时: 进入测验页 → 等题目渲染 → AI 填答 → 自动提交 → 继续连播。
+    // 前提: 用户勾选了"连播"(视为接受全自动完成测验); AI 一题都没填上时不提交, 转手动。
+    function findExamIframeDoc() {
+        const iframes = document.querySelectorAll('iframe');
+        for (let i = 0; i < iframes.length; i++) {
+            try {
+                const f = iframes[i];
+                const d = f.contentDocument || f.contentWindow.document;
+                if (d && d.querySelectorAll('.queContainer').length > 0) return { doc: d, win: f.contentWindow };
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    function findButtonByText(doc, text) {
+        const els = doc.querySelectorAll('button, a, input[type="button"], input[type="submit"], div, span');
+        for (let i = 0; i < els.length; i++) {
+            const el = els[i];
+            if ((el.innerText || el.value || '').trim() === text && el.children.length === 0) return el;
+        }
+        return null;
+    }
+
+    function autoCompleteQuizFlow(attempts) {
+        // 连播被取消就停 (用户中途关闭连播 = 接管)
+        var continueBox = document.getElementById('continue');
+        if (!continueBox || !continueBox.checked) {
+            window.__uoocSilentAnswer = false;
+            console.log('[UOOC助手] 连播已取消，停止测验自动完成');
+            return;
+        }
+
+        var exam = findExamIframeDoc();
+        if (!exam) {
+            if (attempts > 0) { setTimeout(() => autoCompleteQuizFlow(attempts - 1), 2000); }
+            else { console.log('[UOOC助手] 等待测验页面加载超时，连播停止'); window.__uoocNavPending = false; }
+            return;
+        }
+        if (exam.doc.querySelectorAll('.queContainer').length === 0) {
+            if (attempts > 0) { setTimeout(() => autoCompleteQuizFlow(attempts - 1), 2000); }
+            return;
+        }
+
+        console.log('[UOOC助手] 测验页已就绪，开始 AI 答题...');
+        window.__uoocSilentAnswer = true;
+        autoAnswerQuiz().then(function() {
+            window.__uoocAnswerBusy = false;
+            var res = window.__uoocLastFillResult || { filled: 0, total: 0 };
+            console.log('[UOOC助手] 测验自动填答完成: ' + res.filled + '/' + res.total);
+            if (res.filled <= 0) {
+                console.log('[UOOC助手] AI 一题都没填上，不自动提交，请你手动处理');
+                window.__uoocSilentAnswer = false;
+                window.__uoocNavPending = false;
+                return;
+            }
+            // 提交: 先覆盖原生 confirm, 再点"提交试卷", 再点确认弹层
+            try { exam.win.confirm = function() { return true; }; } catch (e) {}
+            var submitBtn = findButtonByText(exam.doc, '提交试卷');
+            if (!submitBtn) { console.log('[UOOC助手] 未找到"提交试卷"按钮，请你手动提交'); window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
+            submitBtn.click();
+            console.log('[UOOC助手] 已点击提交试卷，等待确认弹层...');
+            var confirmTries = 8;
+            var confirmTimer = setInterval(function() {
+                confirmTries--;
+                var okBtn = null;
+                var layerBtns = exam.doc.querySelectorAll('.layui-layer-btn a, .layui-layer button, .layui-layer input[type="button"]');
+                for (var k = 0; k < layerBtns.length; k++) {
+                    var t = (layerBtns[k].innerText || layerBtns[k].value || '').trim();
+                    if (t.indexOf('确定') >= 0 || t.indexOf('确认') >= 0) { okBtn = layerBtns[k]; break; }
+                }
+                if (okBtn) {
+                    clearInterval(confirmTimer);
+                    okBtn.click();
+                    console.log('[UOOC助手] 测验已自动提交，6 秒后继续连播');
+                    setTimeout(function() {
+                        window.__uoocSilentAnswer = false;
+                        window.__uoocNavPending = false;
+                        window.__uoocLastForwardClick = Date.now();
+                        findNextVideo();
+                    }, 6000);
+                } else if (confirmTries <= 0) {
+                    clearInterval(confirmTimer);
+                    console.log('[UOOC助手] 未检测到确认弹层（可能已直接提交），8 秒后继续连播');
+                    setTimeout(function() {
+                        window.__uoocSilentAnswer = false;
+                        window.__uoocNavPending = false;
+                        window.__uoocLastForwardClick = Date.now();
+                        findNextVideo();
+                    }, 8000);
+                }
+            }, 1000);
         });
     }
 
@@ -2108,7 +2211,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.1.2';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.2.0';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2567,8 +2670,20 @@
                                 return;
                             }
                             if (isQuizLike(row)) {
-                                console.log('[UOOC助手] 跳过测验/作业，继续找下一个视频');
-                                continue;
+                                // 连播遇到测验: 进入并自动完成 (AI 填答 + 自动提交), 而不是跳过卡住
+                                console.log('[UOOC助手] 连播遇到测验，进入并自动完成');
+                                window.__uoocNavPending = true;
+                                window.__uoocSilentAnswer = true;
+                                window.__uoocAnswerBusy = true;
+                                window.__uoocLastForwardClick = Date.now();
+                                row.click();
+                                if (attemptsLeft > 1) {
+                                    setTimeout(() => { autoCompleteQuizFlow(attempts - 1); }, 3000);
+                                } else {
+                                    window.__uoocNavPending = false;
+                                    window.__uoocSilentAnswer = false;
+                                }
+                                return;
                             }
                             continue; // 讨论/文本/附件: 跳过
                         }
