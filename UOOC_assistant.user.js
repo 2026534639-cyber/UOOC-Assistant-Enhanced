@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.10.3
+// @version      2.11.1
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.10.3 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.11.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1960,8 +1960,11 @@
     // （表现就是"点了自动讨论，可是并没有真的讨论"）。
     // 改为相似度判据：最长公共连续片段要达到「14 字」且「新句长度的 55%」才算重复。
     function isDuplicateReply(newText, existingTexts, opts) {
-        var minRun = (opts && opts.minRun) || 14;      // 最长公共连续片段至少这么长才算"抄"
-        var ratio = (opts && opts.ratio) || 0.55;      // 且要占新句长度的这个比例
+        // 判"抄"的尺度：最长公共连续片段 占【两条里较短那条】的比例。
+        // 用较短那条而不是新句长度，是为了让"短句被整句照搬"也能被抓住；
+        // floorLen 只是个很小绝对下限（避免三五个字的巧合一刀切）。
+        var floorLen = (opts && opts.floor != null) ? opts.floor : 8;
+        var ratio = (opts && opts.ratio != null) ? opts.ratio : 0.55;
         var n = String(newText || '').replace(/\s/g, '');
         if (n.length < 6) return true;
         for (var i = 0; i < existingTexts.length; i++) {
@@ -1972,14 +1975,21 @@
                 continue;
             }
             var run = longestCommonRun(n, e);
-            if (run >= Math.max(minRun, Math.floor(n.length * ratio))) return true;
+            var need = Math.max(floorLen, Math.floor(Math.min(n.length, e.length) * ratio));
+            if (run >= need) return true;
         }
         return false;
     }
 
     // 构造带已有发言上下文的提示词 (让 AI 避开重复观点)
-    function buildDiscussPrompt(topic, existing, count) {
+    function buildDiscussPrompt(topic, existing, count, questionTopic) {
         var pr = '这门课的讨论区话题是：' + topic + '\n';
+        if (questionTopic) {
+            pr += '\n这是一个知识性的问题，重点是【把答案答对、答全】：\n';
+            pr += '  · 先把最核心的定义或结论用一句话说清；\n';
+            pr += '  · 再补上成立条件、容易漏掉的情况，或一个具体的例子；\n';
+            pr += '  · 2-3 句话，说得具体一点，但别写成长篇大论、不要分点。\n';
+        }
         if (existing.length > 0) {
             pr += '\n讨论区已有人发过的发言（务必避开这些观点和表述，不要换汤不换药）：\n';
             existing.slice(0, 8).forEach(function(t, i) { pr += (i + 1) + '. ' + t.substring(0, 60) + '\n'; });
@@ -2053,14 +2063,17 @@
     }
 
     var REPLY_MAX = 3;        // 上限（好写的最多发这么多）
-    var NOVEL_OK = 0.45;      // 跟已有发言相似度 ≤ 0.45 才算"有新意，值得发"
-    var NOVEL_LAST = 0.60;    // 退一步：实在没有更好的，只要不过这条线就发 1 条
+    // 门槛按话题类型给（见 buildDiscussPrompt 的 questionTopic）：
+    //   · 提问型 / 学术性：几乎不设新意门槛 —— 题目就是让你答，答对答全才是重点
+    //   · 开放式（"谈谈你的看法"）：稍有门槛，避免跟人雷同得像复制
+    // 硬判重（dup）只在"几乎逐字照抄"时才拦，不再因为"意思相近"就整条否掉。
+    var QUESTION_LINES = { ok: 0.85, dup: { floor: 8, ratio: 0.85 } };  // 只有近乎整句照搬才拦
+    var OPEN_LINES = { ok: 0.60, dup: { floor: 8, ratio: 0.55 } };
 
     function chooseReplies(cands, existing, maxWant, lines) {
         var cap = maxWant || REPLY_MAX;
-        var okLine = (lines && lines.ok != null) ? lines.ok : NOVEL_OK;      // 够新意的线
-        var lastLine = (lines && lines.last != null) ? lines.last : NOVEL_LAST; // 退一步只发一条的线
-        var dupOpts = (lines && lines.dup) ? lines.dup : null;               // 硬判重参数（提问型放宽）
+        var okLine = (lines && lines.ok != null) ? lines.ok : OPEN_LINES.ok; // 够格的线
+        var dupOpts = (lines && lines.dup) ? lines.dup : OPEN_LINES.dup;     // 硬判重参数（只拦"照抄"）
         var list = (cands || []).filter(function(t) {
             return t && String(t).trim().length >= 8 && !isDuplicateReply(t, existing, dupOpts);
         });
@@ -2088,14 +2101,18 @@
         var good = scored.filter(function(o) { return o.sim <= okLine; }).slice(0, cap);
         if (good.length > 0) {
             return { list: good.map(function(o) { return o.t; }),
-                     why: '够新意的有 ' + good.length + ' 条 → 发 ' + good.length + ' 条' };
+                     why: '够格发的有 ' + good.length + ' 条 → 发 ' + good.length + ' 条' };
         }
-        if (scored.length > 0 && scored[0].sim <= lastLine) {
-            return { list: [scored[0].t],
-                     why: '没有特别新意的，最好那条相似度 ' + (Math.round(scored[0].sim * 100) / 100) +
-                          ' → 就发 1 条' };
+        // 【不再整条跳过】一条都没过线时，至少把最不雷同的那条发出去。
+        // 理由: 讨论讲究"参与了"，全跳过等于一个都没做（实测就是这么被跳空的）；
+        // 只有"跟已有发言几乎逐字相同"的候选才会在硬判重那步就被滤掉。
+        if (scored.length > 0) {
+            var best = scored[0];
+            return { list: [best.t],
+                     why: '没有明显新意的 → 只发最不雷同的 1 条（与已有相似度 ' +
+                          (Math.round(best.sim * 100) / 100) + '）' };
         }
-        return { list: [], why: '没有一条能跟已有发言拉开距离 → 这个讨论跳过不发' };
+        return { list: [], why: '生成的候选都跟已有发言几乎逐字相同 → 这个讨论跳过' };
     }
 
     // 候选不够时：让模型把现有草稿"融合重写"成 want 条互不雷同的新发言
@@ -2342,8 +2359,11 @@
             }
         }
         if (cnt) {
+            var marked = 0;
+            try { marked = Object.keys(loadDiscussed()).length; } catch (e) {}
             cnt.textContent = '已处理 ' + done + ' 个讨论' +
-                              (total > 0 ? (' / 共 ' + total + ' 个') : '（总数暂不可用）');
+                              (total > 0 ? (' / 共 ' + total + ' 个') : '（总数暂不可用）') +
+                              (marked > 0 ? '　已标记 ' + marked + ' 个' : '');
         }
         if (st) st.textContent = window.__uoocSweepStatus || '';
         if (ago) {
@@ -2370,6 +2390,39 @@
     // 使用场景: 视频/测验都已经刷完, 只剩讨论没做 —— 点一下「💬 自动讨论」,
     // 脚本从当前讨论开始发 3 条, 然后自动去找下一个讨论、再发 3 条……直到没有讨论为止。
     // 期间 window.__uoocOnlyDiscussions = true, 扫描会把视频与测验直接跳过。
+    // ==================== 「已评论过」的持久标记 ====================
+    // 需求原话：「评论过就标记呀，标记才跳过」。
+    // 所以：只有在【确实发出过回复】之后才打标记；有标记的讨论才跳过；
+    // 没标记的（哪怕只是进过、看过）都照常评论。标记存在 localStorage，重启浏览器也在。
+    function discussionKey() {
+        var h = location.hash || '';
+        // 路由最后那个数字段就是该讨论的资源 id（.../{sourceId}/subsection）
+        var m = h.match(/\/(\d+)\/(?:section|subsection|homework|exam)?\s*$/);
+        if (m) return m[1];
+        var nums = h.match(/\d+/g);
+        return nums ? nums[nums.length - 1] : h;
+    }
+
+    function loadDiscussed() {
+        try { return JSON.parse(localStorage.getItem('uooc_discussed') || '{}') || {}; }
+        catch (e) { return {}; }
+    }
+
+    function markDiscussed(key, n) {
+        try {
+            var all = loadDiscussed();
+            var prev = all[key] || { n: 0 };
+            all[key] = { at: Date.now(), n: (prev.n || 0) + (n || 1), title: document.title || '' };
+            localStorage.setItem('uooc_discussed', JSON.stringify(all));
+            console.log('[UOOC助手-讨论] 已标记该讨论为"评论过"→ 以后自动跳过（共标记 ' +
+                        Object.keys(all).length + ' 个）');
+        } catch (e) {}
+    }
+
+    function clearDiscussed() {
+        try { localStorage.removeItem('uooc_discussed'); } catch (e) {}
+    }
+
     // 清扫状态落盘（sessionStorage）：用于识别"清扫被整页刷新/崩溃打断"这种静默停止
     function saveSweepState() {
         try {
@@ -2391,7 +2444,7 @@
         window.__uoocNavPending = false;
         if (window.__uoocDiscussBtn) {
             window.__uoocDiscussBtn.innerText = '💬 自动讨论';
-            window.__uoocDiscussBtn.title = '自动讨论：从当前讨论开始，自动依次处理后面的所有讨论（每个发 3 条）。需先打开一个"讨论"任务点页面';
+            window.__uoocDiscussBtn.title = '自动讨论：只评论【还没评论过】的讨论（评论过的会记下来并跳过）。按住 Shift 点一下可清除记录、重新开始';
         }
         clearSweepState();
         var n = window.__uoocSweepPosted || 0;
@@ -2506,8 +2559,20 @@
             console.log('[UOOC助手] 连播已取消，停止讨论自动发布');
             return;
         }
-        // 清扫模式: 记录已处理过的讨论页, 防止"点回同一个讨论"造成死循环
+        // 清扫模式：① 已经评论过的（有标记）直接跳过；② 记录走过的页面防死循环
         if (window.__uoocDiscussSweep) {
+            var dKey = discussionKey();
+            var marks = loadDiscussed();
+            if (marks[dKey]) {
+                console.log('[UOOC助手-讨论] 这个讨论【已评论过】，按标记跳过 →', dKey,
+                            '（标记时间 ' + new Date(marks[dKey].at).toLocaleString() + '）');
+                touchSweepPanel('该讨论已评论过（有标记）→ 跳过，找下一个');
+                window.__uoocSilentAnswer = false;
+                window.__uoocNavPending = false;
+                window.__uoocLastForwardClick = Date.now();
+                setTimeout(function() { findNextVideo(); }, 1200);
+                return;
+            }
             window.__uoocSweptHashes = window.__uoocSweptHashes || {};
             var curHash = location.hash || '';
             console.log('[UOOC助手-讨论] 清扫推进 → 进入讨论页面（已处理 ' + (window.__uoocSweepPosted || 0) +
@@ -2546,7 +2611,7 @@
                             (hdr !== null ? '服务端记 ' + hdr + ' 条回复' : '已有 ' + existing.length + ' 条发言') + '）');
         }
         var CAND = 6;          // 先多要一点候选，再按质量挑（好写多发、勉强少发、不够格不发）
-        var prompt = buildDiscussPrompt(topic, existing, CAND);
+        var prompt = buildDiscussPrompt(topic, existing, CAND, isQuestionTopic(topic));
         if (window.__uoocDiscussSweep) {
             window.__uoocSweepGenAt = Date.now();
             touchSweepPanel('正在让 AI 生成 ' + CAND + ' 条候选发言…（超时上限 60 秒）');
@@ -2561,13 +2626,10 @@
                 if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
             }
             // 聚合 → 评分 → 按质量定条数（提问型把"新意"门槛放宽：答对更重要）
-            // 提问型：新意门槛放宽到 0.75，硬判重也放宽（20 字连续重合才算抄），
-            // 因为这类讨论里"答案本该相近"，只要不是照抄就该能答
-            var lines = questionTopic
-                ? { ok: 0.75, last: 0.9, dup: { minRun: 20, ratio: 0.85 } }
-                : { ok: NOVEL_OK, last: NOVEL_LAST };
+            // 提问型 / 学术性讨论：基本不设新意门槛（0.85），只要不是照抄就答
+            var lines = questionTopic ? QUESTION_LINES : OPEN_LINES;
             var pick = chooseReplies(parsed, existing, REPLY_MAX, lines);
-            if (questionTopic) console.log('[UOOC助手-讨论] 这是提问型讨论 → 新意门槛放宽（相似度 ≤0.75 即可发）');
+            if (questionTopic) console.log('[UOOC助手-讨论] 这是提问型/学术性讨论 → 基本不设新意门槛（≤0.85 即发，且至少发 1 条）');
             console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
                         parsed.length + ' 条 → ' + pick.why);
             if (pick.list.length > 0) return pick.list;
@@ -2591,7 +2653,7 @@
                 if (window.__uoocDiscussSweep) touchSweepPanel('没有够格发的发言，跳过这个讨论');
                 console.log('[UOOC助手-讨论] 清扫推进 → 跳过该讨论，去找下一个（已处理 ' + (window.__uoocSweepPosted || 0) + ' 个）');
                 console.log('[UOOC助手-讨论] 跳过这个讨论：已有 ' + existing.length + ' 条发言，' +
-                            (questionTopic ? '（提问型，门槛已放宽到 0.75）' : '（开放式讨论，门槛 0.45）') +
+                            (questionTopic ? '（提问型，门槛已放宽到 0.85）' : '（开放式讨论，门槛 0.60）') +
                             '本次候选没有一条过线。若你认为该发，把上面"候选评分"那行发我调阈值');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
@@ -2635,6 +2697,7 @@
                         confirmReplyPosted(fresh[i], function(confirmed) {
                             if (confirmed) {
                                 window.__uoocSweepInDisc = (i + 1) / Math.max(1, fresh.length);
+                                markDiscussed(discussionKey(), 1);   // 确认发出去了才打标记
                                 touchSweepPanel('✅ 第 ' + (i + 1) + '/' + fresh.length + ' 条已确认提交');
                             } else {
                                 touchSweepPanel('⚠️ 第 ' + (i + 1) + '/' + fresh.length + ' 条点了回复，但没看到新发言（可能被拦截或需人机验证）');
@@ -3267,9 +3330,19 @@
             container.appendChild(progressBtn);
             var discussBtn = document.createElement('button');
             discussBtn.innerText = '💬 自动讨论';
-            discussBtn.title = '自动讨论：在当前讨论页发布 3 条不同角度的简短发言（会先读取已有发言、避开重复观点）。需先打开一个"讨论"任务点页面';
+            discussBtn.title = '自动讨论：只评论【还没评论过】的讨论（评论过的会记下来并跳过）。按住 Shift 点一下可清除记录、重新开始';
             discussBtn.style = 'margin-left: 8px; padding: 2px 8px; font-size: 12px; cursor: pointer; border: none; border-radius: 4px; background: #3d5a80; color: #fff;';
-            discussBtn.onclick = function() {
+            discussBtn.onclick = function(ev) {
+                // Shift+点击 = 清除"已评论过"的标记（想重新评论一遍时用）
+                if (ev && ev.shiftKey) {
+                    var marked = 0;
+                    try { marked = Object.keys(loadDiscussed()).length; } catch (e) {}
+                    if (!window.confirm('清除「已评论过」的记录？\n\n当前已标记 ' + marked +
+                        ' 个讨论。清除后，再点「自动讨论」会把这些讨论重新评论一遍（会再多发一条）。确定清除？')) return;
+                    clearDiscussed();
+                    alert('已清除「已评论过」的记录（' + marked + ' 个）');
+                    return;
+                }
                 if (typeof autoDiscussFlow === 'function') autoDiscussFlow();
             };
             window.__uoocDiscussBtn = discussBtn; // 清扫进行中要改按钮文案
@@ -3285,7 +3358,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.10.3';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.11.1';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
