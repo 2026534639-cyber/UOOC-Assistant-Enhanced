@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.1.0
+// @version      2.1.1
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.1.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.1.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2108,7 +2108,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.1.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.1.1';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2483,6 +2483,11 @@
                     var t = node.innerText || '';
                     return t.indexOf('测验') >= 0 || t.indexOf('作业') >= 0 || t.indexOf('考试') >= 0;
                 };
+                // 标题文本归一化: 侧栏激活行标题里的空格是不换行空格 (U+00A0),
+                // 点击前后的 innerText 空格种类不同, 不归一化精确匹配永远失败
+                let normLabel = (t) => {
+                    return String(t || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+                };
                 // 顺序连播 = 目录树遍历 (多层级: 章节→小节→知识点→任务):
                 // 1. 从当前位置向后扫, 跳过测验/讨论/文本, 遇视频就播
                 // 2. 遇到折叠的标题 → 点击进入, 然后【等待它的任务列表渲染出来】才继续扫
@@ -2496,7 +2501,8 @@
                         // 正在等待刚进入的标题 (waitText) 渲染出任务列表
                         let idx = -1;
                         for (let k = 0; k < rows.length; k++) {
-                            if ((rows[k].innerText || '').trim() === waitText) { idx = k; break; }
+                            let t = normLabel(rows[k].innerText);
+                            if (t === waitText || t.indexOf(waitText) >= 0) { idx = k; break; }
                         }
                         if (idx < 0) {
                             if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText); }, 700); return; }
@@ -2539,7 +2545,7 @@
                             let nextNg = nextRow ? (nextRow.getAttribute('ng-click') || '') : '';
                             let expanded = nextNg.indexOf('goSource') >= 0;
                             if (!expanded) {
-                                var hText = (row.innerText || '').trim();
+                                var hText = normLabel(row.innerText);
                                 window.__uoocNavPending = true;
                                 row.click();
                                 console.log('[UOOC助手] 进入下一章节/知识点:', hText);
