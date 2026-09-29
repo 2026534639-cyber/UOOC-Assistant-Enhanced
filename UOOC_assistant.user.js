@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
-// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
+// @version      2.1.0
+// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
 // @include      https://www.uooc.net.cn/home/course/exam/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.0.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.1.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1537,6 +1537,17 @@
                 v.play();
             }
         };
+        // ended 双保险: onended 属性可能被站点自身代码覆盖, addEventListener 不受影响。
+        // 4 秒去重窗防止两条路径同时触发导致连点。
+        var endedHandler = function() {
+            var now = Date.now();
+            if (window.__uoocLastEnded && now - window.__uoocLastEnded < 4000) return;
+            window.__uoocLastEnded = now;
+            console.log('[UOOC助手] 视频播放结束，触发连播');
+            findNextVideo();
+        };
+        video.onended = endedHandler;
+        video.addEventListener('ended', endedHandler);
 
         // 新增：窗口重新获得焦点时自动恢复视频播放 (解决鼠标移开/失去焦点暂停问题)
         if (!__videoEventBound) {
@@ -1699,7 +1710,19 @@
                 applyVideoSettings();
                 bindVideoEvents();
                 refreshProgressPanel(); // 进度悬浮窗打开时自动刷新 (关闭状态直接返回)
-
+                // 连播自愈: ended 事件被吞/处理器被覆盖时, 视频会停在最后一秒 —
+                // 每 3 秒检查一次, 停在结尾就重试推进 (endedHandler 的 4 秒去重防连点)。
+                // 若上次"向前点击"后 15 秒内仍在原地 (下一个视频被锁, 点不开), 不再反复点击。
+                try {
+                    var v = getCurrentVideo();
+                    if (v && v.ended && document.getElementById('continue') && document.getElementById('continue').checked &&
+                        (!window.__uoocLastEnded || Date.now() - window.__uoocLastEnded >= 4000) &&
+                        (!window.__uoocLastForwardClick || Date.now() - window.__uoocLastForwardClick >= 15000)) {
+                        window.__uoocLastEnded = Date.now();
+                        console.log('[UOOC助手] 检测到视频停在结尾，重试连播推进');
+                        findNextVideo();
+                    }
+                } catch(e) {}
             }, 3000);
         }
 
@@ -1861,6 +1884,7 @@
             rateCheckbox.appendChild(rateLabel);
             var volumeCheckbox = getCheckbox('volume', '静音');
             var playCheckbox = getCheckbox('play', '播放');
+            var continueCheckbox = getCheckbox('continue', '连播');
             var copyButton = getCopyButton();
 
             // 创建LLM答题复选框和设置按钮
@@ -2070,6 +2094,7 @@
             container.appendChild(rateCheckbox);
             container.appendChild(volumeCheckbox);
             container.appendChild(playCheckbox);
+            container.appendChild(continueCheckbox);
             container.appendChild(copyButton);
             container.appendChild(progressBtn);
         }
@@ -2083,7 +2108,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.0.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.1.0';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2298,6 +2323,261 @@
                 }
             }
         };
+    }
+
+    function findNextVideo() {
+        var video = document.getElementById('player_html5_api') ||
+                    document.querySelector('video.vjs-tech');
+
+        if (video) {
+            if (!document.getElementById('continue') || !document.getElementById('continue').checked) {
+                video.currentTime = 0;
+            } else {
+                let current_video = document.querySelector('.basic.active');
+                if (!current_video) {
+                    // 尝试备用选择器
+                    current_video = document.querySelector('.active-video, .current-video, .video-item.active');
+                }
+                if (!current_video) return;
+
+                let next_part = current_video.parentNode;
+                let next_video = current_video;
+                // 连播只在视频之间切换: 讨论/测验/文档任务点一律跳过 (答题由用户手动完成)
+                let isVideo = (node) => { return Boolean(node && (node.querySelector('span.icon-video') || node.querySelector('.video-icon') || node.querySelector('[class*="video"]'))); };
+                let canBack = () => { return Boolean(next_part.parentNode.parentNode.tagName === 'LI'); };
+                let toNextVideo = () => {
+                    next_video = next_video.nextElementSibling;
+                    while (next_video && !isVideo(next_video)) next_video = next_video.nextElementSibling;
+                };
+                let isExistsVideo = () => {
+                    let _video = next_part.firstElementChild;
+                    while (_video && !isVideo(_video)) _video = _video.nextElementSibling;
+                    return Boolean(_video && isVideo(_video));
+                };
+                let isExistsNextVideo = () => {
+                    let _video = current_video.nextElementSibling;
+                    while (_video && !isVideo(_video)) _video = _video.nextElementSibling;
+                    return Boolean(_video && isVideo(_video));
+                };
+                let isExistsNextListAfterFile = () => {
+                    let part = next_part.nextElementSibling;
+                    return Boolean(part && part.childElementCount > 0);
+                };
+                let toNextListAfterFile = () => { next_part = next_part.nextElementSibling; };
+                let toOuterList = () => { next_part = next_part.parentNode.parentNode; };
+                let toOuterItem = () => { next_part = next_part.parentNode; };
+                let isExistsNextListAfterList = () => { return Boolean(next_part.nextElementSibling); };
+                let toNextListAfterList = () => { next_part = next_part.nextElementSibling; };
+                let expandList = () => {
+                    if (next_part.firstElementChild) {
+                        next_part.firstElementChild.click();
+                    }
+                };
+                let toExpandListFirstElement = () => {
+                    next_part = next_part.firstElementChild.nextElementSibling;
+                    if (next_part && next_part.classList.contains('unfoldInfo')) next_part = next_part.nextElementSibling;
+                };
+                let isList = () => { return Boolean(next_part && next_part.tagName === 'UL'); };
+                let toInnerList = () => { next_part = next_part.firstElementChild; };
+                let toFirstVideo = () => {
+                    next_video = next_part.firstElementChild;
+                    while (next_video && !isVideo(next_video)) next_video = next_video.nextElementSibling;
+                };
+
+                let mode = {
+                    FIRST_VIDEO: 'FIRST_VIDEO',
+                    NEXT_VIDEO: 'NEXT_VIDEO',
+                    LAST_LIST: 'LAST_LIST',
+                    NEXT_LIST: 'NEXT_LIST',
+                    INNER_LIST: 'INNER_LIST',
+                    OUTER_LIST: 'OUTER_LIST',
+                    OUTER_ITEM: 'OUTER_ITEM',
+                };
+
+                let search = (_mode) => {
+                    switch (_mode) {
+                        case mode.FIRST_VIDEO:
+                            if (isExistsVideo()) {
+                                toFirstVideo();
+                                if (next_video) next_video.click();
+                                start();
+                            } else if (isExistsNextListAfterFile()) {
+                                search(mode.LAST_LIST);
+                            } else if (window.canIgnoreTest) {
+                                next_part = next_part.lastElementChild;
+                                search(mode.OUTER_LIST);
+                            }
+                            break;
+                        case mode.NEXT_VIDEO:
+                            if (isExistsNextVideo()) {
+                                toNextVideo();
+                                if (next_video) next_video.click();
+                                start();
+                            } else if (isExistsNextListAfterFile()) {
+                                search(mode.LAST_LIST);
+                            } else {
+                                search(mode.OUTER_ITEM);
+                            }
+                            break;
+                        case mode.LAST_LIST:
+                            toNextListAfterFile();
+                            toInnerList();
+                            search(mode.INNER_LIST);
+                            break;
+                        case mode.NEXT_LIST:
+                            toNextListAfterList();
+                            search(mode.INNER_LIST);
+                            break;
+                        case mode.INNER_LIST:
+                            if (next_part.firstElementChild) {
+                                expandList();
+                                function waitForExpand() {
+                                    if (next_part.firstElementChild.nextElementSibling) {
+                                        if (next_part.firstElementChild.nextElementSibling.childElementCount === 0) {
+                                            search(mode.OUTER_LIST);
+                                        } else {
+                                            toExpandListFirstElement();
+                                            if (isList()) {
+                                                toInnerList();
+                                                search(mode.INNER_LIST);
+                                            } else {
+                                                search(mode.FIRST_VIDEO);
+                                            }
+                                        }
+                                    } else {
+                                        setTimeout(waitForExpand, 250);
+                                    }
+                                }
+                                waitForExpand();
+                            }
+                            break;
+                        case mode.OUTER_LIST:
+                            toOuterList();
+                            if (isExistsNextListAfterList()) {
+                                search(mode.NEXT_LIST);
+                            } else if (canBack()) {
+                                search(mode.OUTER_LIST);
+                            }
+                            break;
+                        case mode.OUTER_ITEM:
+                            toOuterItem();
+                            if (isExistsNextListAfterList()) {
+                                toNextListAfterList();
+                                search(mode.INNER_LIST);
+                            } else if (canBack()){
+                                search(mode.OUTER_LIST);
+                            }
+                            break;
+                        default:
+                            break;
+                    }
+                };
+
+                // 顺序连播 (替代旧的跳跃式状态机):
+                // 闯关模式必须按顺序学, 严格从当前位置向后找 ——
+                // 下一任务是视频 → 播放; 是测验/作业 → 停止 (手动完成后再连播);
+                // 是讨论/文本/附件 → 跳过; 遇到折叠的章节标题 → 展开后重新扫描。
+                let isQuizLike = (node) => {
+                    if (!node) return false;
+                    if (node.querySelector('[class*="icon-test"], [class*="icon-quiz"], [class*="icon-exam"], [class*="icon-homework"]')) return true;
+                    var t = node.innerText || '';
+                    return t.indexOf('测验') >= 0 || t.indexOf('作业') >= 0 || t.indexOf('考试') >= 0;
+                };
+                // 顺序连播 = 目录树遍历 (多层级: 章节→小节→知识点→任务):
+                // 1. 从当前位置向后扫, 跳过测验/讨论/文本, 遇视频就播
+                // 2. 遇到折叠的标题 → 点击进入, 然后【等待它的任务列表渲染出来】才继续扫
+                //    (不等待的话会跳过该知识点直接点到更后面的大章节 — 闯关模式会走乱)
+                // 3. 等待超时 (空知识点) → 跳过它继续
+                let linearScan = (attemptsLeft, waitText) => {
+                    let rows = Array.from(document.querySelectorAll('.basic'));
+                    let startIdx;
+
+                    if (waitText) {
+                        // 正在等待刚进入的标题 (waitText) 渲染出任务列表
+                        let idx = -1;
+                        for (let k = 0; k < rows.length; k++) {
+                            if ((rows[k].innerText || '').trim() === waitText) { idx = k; break; }
+                        }
+                        if (idx < 0) {
+                            if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText); }, 700); return; }
+                            window.__uoocNavPending = false;
+                            console.log('[UOOC助手] 目标章节未渲染出来，连播停止');
+                            return;
+                        }
+                        let nextRow = rows[idx + 1];
+                        let nextNg = nextRow ? (nextRow.getAttribute('ng-click') || '') : '';
+                        if (nextNg.indexOf('goSource') < 0) {
+                            // 任务列表还没渲染出来 → 继续等 (绝不越过它往下扫)
+                            if (attemptsLeft > 1) { setTimeout(() => { linearScan(attemptsLeft - 1, waitText); }, 700); return; }
+                            // 等待超时: 该层级没有任务 (空知识点) → 跳过它, 从下一行继续
+                            console.log('[UOOC助手]', waitText, '下无任务，跳过');
+                            startIdx = idx + 1;
+                        } else {
+                            startIdx = idx + 1; // 任务列表已渲染, 从它的任务开始找视频
+                        }
+                    } else {
+                        let cur = rows.findIndex(r => r.classList.contains('active'));
+                        if (cur < 0) {
+                            // 侧栏重渲染期间 active 行会短暂消失 — 耐心重试而不是放弃
+                            if (attemptsLeft > 1) {
+                                setTimeout(() => { linearScan(attemptsLeft - 1); }, 600);
+                                return;
+                            }
+                            window.__uoocNavPending = false;
+                            console.log('[UOOC助手] 找不到当前播放项，连播停止');
+                            return;
+                        }
+                        startIdx = cur + 1;
+                    }
+
+                    for (let i = startIdx; i < rows.length; i++) {
+                        let row = rows[i];
+                        let ng = row.getAttribute('ng-click') || '';
+                        if (ng.indexOf('toggleChapter') >= 0) {
+                            // 标题行: 下一行是任务行 → 已展开 (继续扫); 下一行还是标题 → 折叠的, 点击进入
+                            let nextRow = rows[i + 1];
+                            let nextNg = nextRow ? (nextRow.getAttribute('ng-click') || '') : '';
+                            let expanded = nextNg.indexOf('goSource') >= 0;
+                            if (!expanded) {
+                                var hText = (row.innerText || '').trim();
+                                window.__uoocNavPending = true;
+                                row.click();
+                                console.log('[UOOC助手] 进入下一章节/知识点:', hText);
+                                if (attemptsLeft > 1) {
+                                    setTimeout(() => { linearScan(attemptsLeft - 1, hText); }, 900);
+                                } else {
+                                    window.__uoocNavPending = false;
+                                }
+                                return;
+                            }
+                            continue; // 已展开的标题: 它的任务行就在后面, 继续扫
+                        }
+                        if (ng.indexOf('goSource') >= 0) {
+                            if (isVideo(row)) {
+                                window.__uoocNavPending = false;
+                                window.__uoocLastForwardClick = Date.now();
+                                row.click();
+                                start();
+                                return;
+                            }
+                            if (isQuizLike(row)) {
+                                console.log('[UOOC助手] 跳过测验/作业，继续找下一个视频');
+                                continue;
+                            }
+                            continue; // 讨论/文本/附件: 跳过
+                        }
+                        // 其他行: 跳过
+                    }
+                    window.__uoocNavPending = false;
+                    console.log('[UOOC助手] 后续没有可自动播放的视频，连播停止');
+                };
+                try {
+                    linearScan(10);
+                } catch (err) {
+                    console.error('[UOOC助手] 查找下一个视频出错:', err);
+                }
+            }
+        }
     }
 
     function init() {
