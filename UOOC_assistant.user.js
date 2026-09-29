@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.10.0
+// @version      2.10.3
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.10.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.10.3 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1959,7 +1959,9 @@
     // 结果 3 条发言全被判雷同 → 整个讨论被跳过 → 一条都没发出去
     // （表现就是"点了自动讨论，可是并没有真的讨论"）。
     // 改为相似度判据：最长公共连续片段要达到「14 字」且「新句长度的 55%」才算重复。
-    function isDuplicateReply(newText, existingTexts) {
+    function isDuplicateReply(newText, existingTexts, opts) {
+        var minRun = (opts && opts.minRun) || 14;      // 最长公共连续片段至少这么长才算"抄"
+        var ratio = (opts && opts.ratio) || 0.55;      // 且要占新句长度的这个比例
         var n = String(newText || '').replace(/\s/g, '');
         if (n.length < 6) return true;
         for (var i = 0; i < existingTexts.length; i++) {
@@ -1970,7 +1972,7 @@
                 continue;
             }
             var run = longestCommonRun(n, e);
-            if (run >= Math.max(14, Math.floor(n.length * 0.55))) return true;
+            if (run >= Math.max(minRun, Math.floor(n.length * ratio))) return true;
         }
         return false;
     }
@@ -2039,14 +2041,28 @@
     //   · 随机抽样：同分之间随机排序，避免每次都挑同一批
     // 【能力边界】聚合靠字符串相似度，只能合并字面近似的；"换个说法讲同一件事"
     // 抓不住，那类靠提示词强制多角度解决（见 buildDiscussPrompt），这里不假装能识别语义。
+    // 话题是不是"提问型"（问一个知识性问题）。
+    // 区别对待的理由：提问型讨论（"什么叫函数的自然定义域？"）里，
+    // 【把问题答对答清楚】才是重点，跟别人说得像不代表没价值 —— 题目问的就是这个；
+    // 而开放式讨论（"谈谈你对…的看法"）里跟别人雷同就是刷屏。
+    // 所以提问型用更宽的新意门槛，避免"明明能答却不发"。
+    function isQuestionTopic(topic) {
+        var t = String(topic || '');
+        if (/[？?]/.test(t)) return true;
+        return /(什么叫|什么是|是什么|为什么|怎么|如何|是否|能不能|可不可以|举例说明|谈谈.*的(理解|区别|关系))/.test(t);
+    }
+
     var REPLY_MAX = 3;        // 上限（好写的最多发这么多）
     var NOVEL_OK = 0.45;      // 跟已有发言相似度 ≤ 0.45 才算"有新意，值得发"
     var NOVEL_LAST = 0.60;    // 退一步：实在没有更好的，只要不过这条线就发 1 条
 
-    function chooseReplies(cands, existing, maxWant) {
+    function chooseReplies(cands, existing, maxWant, lines) {
         var cap = maxWant || REPLY_MAX;
+        var okLine = (lines && lines.ok != null) ? lines.ok : NOVEL_OK;      // 够新意的线
+        var lastLine = (lines && lines.last != null) ? lines.last : NOVEL_LAST; // 退一步只发一条的线
+        var dupOpts = (lines && lines.dup) ? lines.dup : null;               // 硬判重参数（提问型放宽）
         var list = (cands || []).filter(function(t) {
-            return t && String(t).trim().length >= 8 && !isDuplicateReply(t, existing);
+            return t && String(t).trim().length >= 8 && !isDuplicateReply(t, existing, dupOpts);
         });
         var clusters = [];
         list.forEach(function(t) {
@@ -2069,12 +2085,12 @@
                 return { 跟已有相似: Math.round(o.sim * 100) / 100, 文: String(o.t).slice(0, 14) };
             })));
 
-        var good = scored.filter(function(o) { return o.sim <= NOVEL_OK; }).slice(0, cap);
+        var good = scored.filter(function(o) { return o.sim <= okLine; }).slice(0, cap);
         if (good.length > 0) {
             return { list: good.map(function(o) { return o.t; }),
                      why: '够新意的有 ' + good.length + ' 条 → 发 ' + good.length + ' 条' };
         }
-        if (scored.length > 0 && scored[0].sim <= NOVEL_LAST) {
+        if (scored.length > 0 && scored[0].sim <= lastLine) {
             return { list: [scored[0].t],
                      why: '没有特别新意的，最好那条相似度 ' + (Math.round(scored[0].sim * 100) / 100) +
                           ' → 就发 1 条' };
@@ -2494,6 +2510,8 @@
         if (window.__uoocDiscussSweep) {
             window.__uoocSweptHashes = window.__uoocSweptHashes || {};
             var curHash = location.hash || '';
+            console.log('[UOOC助手-讨论] 清扫推进 → 进入讨论页面（已处理 ' + (window.__uoocSweepPosted || 0) +
+                        ' 个），hash=' + curHash);
             if (window.__uoocSweptHashes[curHash]) {
                 stopDiscussSweep('检测到又回到同一个讨论，为避免死循环已停止');
                 return;
@@ -2521,6 +2539,7 @@
         console.log('[UOOC助手] 检测到讨论话题:', topic.substring(0, 60));
         window.__uoocSilentAnswer = true;
         var existing = getExistingReplies();
+        var questionTopic = isQuestionTopic(topic);
         if (window.__uoocDiscussSweep) {
             var hdr = getReplyCountFromHeader();
             touchSweepPanel('话题：' + topic.substring(0, 20) + '…（' +
@@ -2541,8 +2560,14 @@
                 console.log('[UOOC助手-讨论] ⚠️ AI 返回内容解析不出条目，原文前 200 字:', String(resp || '').slice(0, 200));
                 if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
             }
-            // 聚合 → 评分 → 按质量定条数
-            var pick = chooseReplies(parsed, existing, REPLY_MAX);
+            // 聚合 → 评分 → 按质量定条数（提问型把"新意"门槛放宽：答对更重要）
+            // 提问型：新意门槛放宽到 0.75，硬判重也放宽（20 字连续重合才算抄），
+            // 因为这类讨论里"答案本该相近"，只要不是照抄就该能答
+            var lines = questionTopic
+                ? { ok: 0.75, last: 0.9, dup: { minRun: 20, ratio: 0.85 } }
+                : { ok: NOVEL_OK, last: NOVEL_LAST };
+            var pick = chooseReplies(parsed, existing, REPLY_MAX, lines);
+            if (questionTopic) console.log('[UOOC助手-讨论] 这是提问型讨论 → 新意门槛放宽（相似度 ≤0.75 即可发）');
             console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
                         parsed.length + ' 条 → ' + pick.why);
             if (pick.list.length > 0) return pick.list;
@@ -2551,7 +2576,7 @@
             if (window.__uoocDiscussSweep) touchSweepPanel('候选都不够新意，正在融合重写…');
             var fuse = buildFusePrompt(topic, existing, parsed.slice(0, 5), REPLY_MAX);
             return callLLMText(fuse, 60000, { temperature: 0.95 }).then(function(resp2) {
-                var again = chooseReplies(parseNumberedReplies(resp2, CAND), existing, REPLY_MAX);
+                var again = chooseReplies(parseNumberedReplies(resp2, CAND), existing, REPLY_MAX, lines);
                 console.log('[UOOC助手-讨论] 融合后：' + again.why);
                 return again.list;
             }).catch(function(e) {
@@ -2563,8 +2588,11 @@
             if (window.__uoocDiscussSweep) window.__uoocSweepGenAt = 0;
             fresh = fresh || [];
             if (fresh.length === 0) {
-                if (window.__uoocDiscussSweep) touchSweepPanel('没有够新意的发言，跳过这个讨论');
-                console.log('[UOOC助手-讨论] 已有 ' + existing.length + ' 条发言，本次没有一条能拉开距离，跳过该讨论');
+                if (window.__uoocDiscussSweep) touchSweepPanel('没有够格发的发言，跳过这个讨论');
+                console.log('[UOOC助手-讨论] 清扫推进 → 跳过该讨论，去找下一个（已处理 ' + (window.__uoocSweepPosted || 0) + ' 个）');
+                console.log('[UOOC助手-讨论] 跳过这个讨论：已有 ' + existing.length + ' 条发言，' +
+                            (questionTopic ? '（提问型，门槛已放宽到 0.75）' : '（开放式讨论，门槛 0.45）') +
+                            '本次候选没有一条过线。若你认为该发，把上面"候选评分"那行发我调阈值');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
                 window.__uoocLastForwardClick = Date.now();
@@ -3257,7 +3285,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.10.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.10.3';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
@@ -3704,7 +3732,7 @@
                                 window.__uoocLastForwardClick = Date.now();
                                 row.click();
                                 if (attemptsLeft > 1) {
-                                    setTimeout(() => { autoCompleteQuizFlow(attempts - 1); }, 3000);
+                                    setTimeout(() => { autoCompleteQuizFlow(attemptsLeft - 1); }, 3000);
                                 } else {
                                     window.__uoocNavPending = false;
                                     window.__uoocSilentAnswer = false;
@@ -3719,7 +3747,10 @@
                                 window.__uoocSilentAnswer = true;
                                 row.click();
                                 if (attemptsLeft > 1) {
-                                    setTimeout(() => { autoDiscussContinueFlow(attempts - 1); }, 3000);
+                                    // 注意: 这里必须用 attemptsLeft —— 原来写的是未定义的 attempts，
+                                    // 传进去是 NaN，于是"讨论页还没加载好"时的重试机制完全失效，
+                                    // 本该重试 8 次实际一次就跳过（网络慢时尤其明显）
+                                    setTimeout(() => { autoDiscussContinueFlow(attemptsLeft - 1); }, 3000);
                                 } else {
                                     window.__uoocNavPending = false;
                                     window.__uoocSilentAnswer = false;
