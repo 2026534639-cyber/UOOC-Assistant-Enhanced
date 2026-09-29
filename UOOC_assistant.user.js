@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.9.7
+// @version      2.9.8
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.9.7 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.9.8 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2302,6 +2302,20 @@
     // 使用场景: 视频/测验都已经刷完, 只剩讨论没做 —— 点一下「💬 自动讨论」,
     // 脚本从当前讨论开始发 3 条, 然后自动去找下一个讨论、再发 3 条……直到没有讨论为止。
     // 期间 window.__uoocOnlyDiscussions = true, 扫描会把视频与测验直接跳过。
+    // 清扫状态落盘（sessionStorage）：用于识别"清扫被整页刷新/崩溃打断"这种静默停止
+    function saveSweepState() {
+        try {
+            if (window.__uoocDiscussSweep) {
+                sessionStorage.setItem('uooc_sweep_state',
+                    JSON.stringify({ at: Date.now(), posted: window.__uoocSweepPosted || 0 }));
+            }
+        } catch (e) {}
+    }
+
+    function clearSweepState() {
+        try { sessionStorage.removeItem('uooc_sweep_state'); } catch (e) {}
+    }
+
     function stopDiscussSweep(msg) {
         window.__uoocDiscussSweep = false;
         window.__uoocOnlyDiscussions = false;
@@ -2311,6 +2325,7 @@
             window.__uoocDiscussBtn.innerText = '💬 自动讨论';
             window.__uoocDiscussBtn.title = '自动讨论：从当前讨论开始，自动依次处理后面的所有讨论（每个发 3 条）。需先打开一个"讨论"任务点页面';
         }
+        clearSweepState();
         var n = window.__uoocSweepPosted || 0;
         console.log('[UOOC助手-讨论] ' + (msg || '讨论清扫结束') + '，本次共处理 ' + n + ' 个讨论');
         window.__uoocSweepNextAt = 0;
@@ -2383,6 +2398,7 @@
             window.__uoocDiscussBtn.title = '讨论清扫进行中，点击停止';
         }
         console.log('[UOOC助手-讨论] 开始讨论清扫（只刷讨论，跳过视频与测验）');
+        saveSweepState();
         autoDiscussContinueFlow(8);
     }
 
@@ -2510,7 +2526,11 @@
                 var cb = document.getElementById('continue');
                 if (!window.__uoocDiscussSweep && (!cb || !cb.checked)) { window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
                 if (i >= fresh.length) {
-                    if (window.__uoocDiscussSweep) { window.__uoocSweepPosted = (window.__uoocSweepPosted || 0) + 1; window.__uoocSweepNextAt = 0; }
+                    if (window.__uoocDiscussSweep) {
+                        window.__uoocSweepPosted = (window.__uoocSweepPosted || 0) + 1;
+                        window.__uoocSweepNextAt = 0;
+                        saveSweepState();
+                    }
                     if (window.__uoocDiscussSweep) touchSweepPanel('本讨论完成（' + fresh.length + ' 条），准备找下一个讨论…');
                     console.log('[UOOC助手-讨论] 本讨论自动发布完成 (' + fresh.length + ' 条)' +
                                 (window.__uoocDiscussSweep ? '，5 秒后自动找下一个讨论' : '，5 秒后继续连播'));
@@ -3181,7 +3201,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.7';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.8';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
@@ -3873,6 +3893,24 @@
 
     // 延迟应用2倍速（等待视频元素加载）
     setTimeout(applyToAllVideos, 1000);
+
+    // 上次讨论清扫是否被"整页刷新 / 页面崩溃 / 导航离开"打断？
+    // 这类中断会让 window 上的清扫状态消失 —— 表现就是"清扫突然不声不响地断了"。
+    // 所以把状态存 sessionStorage，脚本重启时给出明确提示，别让人以为是脚本坏了。
+    try {
+        var _prevSweep = sessionStorage.getItem('uooc_sweep_state');
+        if (_prevSweep) {
+            sessionStorage.removeItem('uooc_sweep_state');
+            var _o = JSON.parse(_prevSweep);
+            if (_o && _o.at && Date.now() - _o.at < 30 * 60 * 1000) {
+                var _mins = Math.max(1, Math.round((Date.now() - _o.at) / 60000));
+                console.warn('[UOOC助手-讨论] ⚠️ 上次讨论清扫在约 ' + _mins + ' 分钟前被中断' +
+                             '（当时已处理 ' + (_o.posted || 0) + ' 个讨论）。' +
+                             '常见原因：页面被整页刷新 / 页面崩溃 / 从课程里导航走 —— ' +
+                             '这些都会清空脚本状态，清扫就停在那里了。要接着刷就再点一次「💬 自动讨论」。');
+            }
+        }
+    } catch (e) {}
 
     // ==================== 界面看门狗 (独立于 init) ====================
     // 为什么必须独立: init() 里若 placeComponents()/bindChapterChange() 抛异常,
