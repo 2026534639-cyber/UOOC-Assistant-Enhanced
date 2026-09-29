@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0
+// @version      2.3.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.2.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.3.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1662,6 +1662,119 @@
         });
     }
 
+    // ==================== 自动讨论：识别话题 → 多角度短发言 → 逐条发布 ====================
+    // 注意: 优课会用 AI 评估讨论发言质量并打击 AI 生成内容,
+    // 所以生成的发言刻意保持学生口吻 (1-2 句、口语化、不同角度、无套话)
+    function getDiscussionTopic() {
+        const els = document.querySelectorAll('div, p, span');
+        for (let i = 0; i < els.length; i++) {
+            const el = els[i];
+            if (el.children.length > 0) continue; // 只看叶子节点
+            const t = (el.innerText || '').trim();
+            if (t.length >= 15 && t.length <= 300 && (t.indexOf('？') >= 0 || t.indexOf('吗') >= 0 || t.indexOf('谈谈') >= 0)) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    function callLLMText(prompt) {
+        var config = LLMConfig.get();
+        if (!config || !config.baseUrl || !config.apiKey) {
+            return Promise.reject(new Error('请先点击⚙️配置 AI API'));
+        }
+        return fetch(config.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config.apiKey },
+            body: JSON.stringify({
+                model: config.model || 'gpt-4o',
+                messages: [
+                    { role: 'system', content: '你是一个在网络讨论区发言的在校大学生，说话口语化、简短、有个人观点。' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.9,
+                max_tokens: 600
+            })
+        }).then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }).then(function(d) {
+            return (d.choices[0].message.content || '').trim();
+        });
+    }
+
+    function getUeditorInstance() {
+        try {
+            if (window.UE && window.UE.instants) {
+                var keys = Object.keys(window.UE.instants);
+                for (var i = 0; i < keys.length; i++) {
+                    var inst = window.UE.instants[keys[i]];
+                    if (inst && typeof inst.setContent === 'function') return inst;
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function postDiscussionReply(text) {
+        var ue = getUeditorInstance();
+        if (!ue) return false;
+        try {
+            ue.ready(function() {
+                try { ue.setContent('<p>' + text + '</p>'); } catch (e) {}
+            });
+        } catch (e) { return false; }
+        var btn = document.querySelector('.replay-editor-btn');
+        if (!btn) return false;
+        btn.click();
+        return true;
+    }
+
+    function autoDiscussFlow() {
+        var topic = getDiscussionTopic();
+        if (!topic) {
+            alert('没有识别到讨论话题，请先打开一个"讨论"页面再点本按钮');
+            return;
+        }
+        var count = 3;
+        if (!window.confirm('检测到讨论话题：\n\n' + topic.substring(0, 150) + '\n\n将自动发布 ' + count + ' 条不同角度的简短发言（每条 1-2 句）。\n\n优课会用 AI 评估发言，已按学生口吻生成，但仍建议发布后自己看一眼。确定执行？')) return;
+
+        var prompt = '这门课的讨论区话题是：' + topic + '\n\n请以选课学生的身份，从3个不同角度各写一条讨论发言。要求：每条1-2句话；口语化、像学生随口打的字；直接给出观点和理由；可以用第一人称；禁止出现"首先""其次""总之""综上""作为一名大学生"等套话；禁止分点和列表；三条的切入角度要明显不同。按格式返回（每行一条）：\n1. 发言内容\n2. 发言内容\n3. 发言内容';
+
+        callLLMText(prompt).then(function(resp) {
+            var replies = [];
+            resp.split('\n').forEach(function(line) {
+                var m = line.trim().match(/^(\d+)[.、:：)]\s*(.+)$/);
+                if (m && m[2].length > 5) replies.push(m[2].replace(/\*/g, '').trim());
+            });
+            if (replies.length === 0) {
+                alert('AI 返回格式解析失败：\n' + resp.substring(0, 200));
+                return;
+            }
+            if (replies.length > count) replies = replies.slice(0, count);
+
+            console.log('[UOOC助手-讨论] 生成 ' + replies.length + ' 条发言，开始逐条发布');
+            var i = 0;
+            function postNext() {
+                if (i >= replies.length) {
+                    console.log('[UOOC助手-讨论] 全部发布完成');
+                    return;
+                }
+                var ok = postDiscussionReply(replies[i]);
+                if (ok) {
+                    console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', replies[i]);
+                    i++;
+                    setTimeout(postNext, 6000 + Math.floor(Math.random() * 6000)); // 随机 6~12 秒
+                } else {
+                    console.log('[UOOC助手-讨论] 编辑器不可用，发布中止');
+                }
+            }
+            postNext();
+        }).catch(function(e) {
+            alert('AI 调用失败: ' + e.message);
+        });
+    }
+
     // ==================== 连播遇测验：自动完成流程 ====================
     // 连播勾选中时: 进入测验页 → 等题目渲染 → AI 填答 → 自动提交 → 继续连播。
     // 前提: 用户勾选了"连播"(视为接受全自动完成测验); AI 一题都没填上时不提交, 转手动。
@@ -2200,6 +2313,14 @@
             container.appendChild(continueCheckbox);
             container.appendChild(copyButton);
             container.appendChild(progressBtn);
+            var discussBtn = document.createElement('button');
+            discussBtn.innerText = '💬 讨论';
+            discussBtn.title = '在讨论页自动发布多条不同角度的简短发言（需先打开一个讨论页面）';
+            discussBtn.style = 'margin-left: 8px; padding: 2px 8px; font-size: 12px; cursor: pointer; border: none; border-radius: 4px; background: #3a3a3a; color: #eee;';
+            discussBtn.onclick = function() {
+                if (typeof autoDiscussFlow === 'function') autoDiscussFlow();
+            };
+            container.appendChild(discussBtn);
         }
 
         /*function setPrompt(container) {
@@ -2211,7 +2332,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.2.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.3.0';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
