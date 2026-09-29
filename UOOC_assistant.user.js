@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.8.6
+// @version      2.9.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.8.6 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.9.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2444,10 +2444,12 @@
             return true;
         }
 
-        // 重入安全: 本函数会被"界面看门狗"重复调用(界面被页面重渲染冲掉时)。
-        // 先把上一轮注入的壳拆干净, 否则每重入一次就把 headContent 多套一层:
-        //   · #head-content-wrapper 里装的是页面原有内容 → 挪回原父节点后再删壳
-        //   · #checkbox-container / #control-panel-toggle 是纯注入物 → 直接删
+        // 重入安全 + 升级兼容: 本函数会被"界面看门狗"重复调用。
+        //   · #uooc-helper-bar 是我们自己的固定条 → 保留、复用 (内容在下面重建)
+        //   · #checkbox-container / #control-panel-toggle 是纯注入物 → 删掉重建
+        //   · #head-content-wrapper / #learn-head-fallback 是【旧版本】注入到网站头部
+        //     留下的壳, 升级后没刷新页面时可能残留: wrapper 里装的是网站原有内容,
+        //     所以先把它的子节点挪回原父节点, 再删掉空壳 (只还原, 不删站点内容)
         (function cleanPreviousInjection() {
             var wrapper = document.getElementById('head-content-wrapper');
             if (wrapper && wrapper.parentNode) {
@@ -2455,7 +2457,7 @@
                 while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
                 parent.removeChild(wrapper);
             }
-            ['checkbox-container', 'control-panel-toggle'].forEach(function(id) {
+            ['checkbox-container', 'control-panel-toggle', 'learn-head-fallback'].forEach(function(id) {
                 var el = document.getElementById(id);
                 if (el && el.parentNode) el.parentNode.removeChild(el);
             });
@@ -2823,171 +2825,79 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.6';
-            div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.0';
+            div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
 
-        // 增强: 尝试多个可能的头部容器选择器 (新旧页面兼容)
-        // 旧页面: .learn-head | 新页面: newlearn-head, .newlearn_head
-        var head = document.querySelector('.learn-head') ||
-                   document.querySelector('.learn-header') ||
-                   document.querySelector('.header') ||
-                   document.querySelector('.control-panel') ||
-                   document.querySelector('newlearn-head') ||
-                   document.querySelector('.newlearn_head') ||
-                   document.querySelector('[class*="learn-head"]') ||
-                   document.querySelector('[class*="control-panel"]');
-
-        if (!head) {
-            // 降级: 优先复用上一轮创建的固定容器 (自愈重入时不要叠出好几个)
-            head = document.getElementById('learn-head-fallback');
-        }
-        if (!head) {
-            // 降级: 在页面顶部创建固定容器
-            console.log('[UOOC助手] 未找到.learn-head元素，创建顶部固定容器...');
-            head = document.createElement('div');
-            head.id = 'learn-head-fallback';
-            head.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; background: rgba(30,30,30,0.9); z-index: 10000; padding: 5px 15px; display: flex; align-items: center;';
-            var headIndicator = document.createElement('span');
-            headIndicator.innerText = 'UOOC助手';
-            headIndicator.style.cssText = 'color: #ccc; font-size: 12px; margin-right: 10px;';
-            head.appendChild(headIndicator);
-            document.body.appendChild(head);
+        // ==================== 界面宿主：挂在 body 上的固定控制条 ====================
+        // 【为什么不再注入到 .learn-head】
+        // 以前是把控件插进优课自己的头部里，还把网站原有的头部内容包进
+        // #head-content-wrapper 来做折叠。可那块 DOM 归 Angular 管：它一重渲染，
+        // 我们插进去的节点就可能整片消失 —— 这就是"UI 老是容易不见"。
+        // 现在改成挂在 document.body 上的固定条：body 不会被 SPA 替换，
+        // 界面就不会再被冲掉，也完全不用去包装/改动网站自己的结构。
+        if (!document.body) {
+            console.log('[UOOC助手] body 尚未就绪，稍后由看门狗重试');
+            return false;
         }
 
-        console.log('[UOOC助手] 找到头部元素:', head.tagName, head.className || head.id);
-
-
-        // 创建包裹容器（用于包裹head的原有内容）
-        let headContent = document.createElement('div');
-        headContent.id = 'head-content-wrapper';
-
-        // 将head的所有子元素移动到contentWrapper中（如果不是创建的fallback）
-        if (head.id !== 'learn-head-fallback') {
-            while (head.firstChild) {
-                headContent.appendChild(head.firstChild);
-            }
-        } else {
-            // fallback模式下不移动子元素，设为null以便后续跳过
-            headContent = null;
+        var bar = document.getElementById('uooc-helper-bar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'uooc-helper-bar';
+            document.body.appendChild(bar);
         }
+        bar.style.cssText = [
+            'position: fixed',
+            'top: 0',
+            'left: 0',
+            'right: 0',
+            'z-index: 99999', // 高于优课自身 UI, 但不至于压住阿里云智能验证那一层
+            'background: rgba(28, 28, 30, 0.94)',
+            'display: flex',
+            'flex-direction: row',
+            'align-items: center',
+            'flex-wrap: wrap',
+            'padding: 2px 10px',
+            'box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35)'
+        ].join(';') + ';';
 
-        // 为head添加过渡动画样式
-        head.style.transition = 'max-height 0.4s ease, opacity 0.4s ease, margin-top 0.4s ease';
-        head.style.overflow = 'visible';
-        head.style.position = 'relative';
-
-        // 创建切换按钮（放在head内，但在contentWrapper外）
-        const toggleBtn = document.createElement('div');
-        toggleBtn.id = 'control-panel-toggle';
-        toggleBtn.innerHTML = '▲';
-        toggleBtn.style.cssText = `
-            position: absolute;
-            bottom: -25px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 80px;
-            height: 25px;
-            background: rgba(51, 51, 51, 0.95);
-            color: #ccc;
-            text-align: center;
-            line-height: 25px;
-            font-size: 12px;
-            cursor: pointer;
-            border-radius: 0 0 10px 10px;
-            transition: all 0.3s ease;
-            z-index: 1000;
-            user-select: none;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
-        `;
-        toggleBtn.onmouseover = function() {
-            this.style.background = 'rgba(102, 126, 234, 0.95)';
-            this.style.color = 'white';
-        };
-        toggleBtn.onmouseout = function() {
-            this.style.background = 'rgba(51, 51, 51, 0.95)';
-            this.style.color = '#ccc';
-        };
-
-        // 创建控制台容器
+        // 控制台容器
         var checkboxContainer = getContainer('checkbox-container');
-        checkboxContainer.style.cssText = `
-            display: flex;
-            flex-direction: row;
-            align-items: center;
-        `;
+        checkboxContainer.style.cssText = 'display: flex; flex-direction: row; align-items: center; flex-wrap: wrap;';
         setCheckboxes(checkboxContainer);
         setAttribution(checkboxContainer);
+        bar.appendChild(checkboxContainer);
 
-        // 组装元素
-        if (headContent) {
-            head.appendChild(headContent);
-        }
-        head.appendChild(checkboxContainer);
+        // 折叠把手：作为控制条内的最后一个元素（margin-left:auto 推到行尾）。
+        // 收起时把控制条本身缩成右上角一个小胶囊 —— 把手就长在条里，既不用为它预留空白，
+        // 也不需要再去动网站自己的头部（原来那套包装网站头部内容的做法正是界面易丢的根源）。
+        var toggleBtn = document.createElement('div');
+        toggleBtn.id = 'control-panel-toggle';
+        toggleBtn.style.cssText = [
+            'margin-left: auto', 'width: 20px', 'height: 16px', 'line-height: 16px',
+            'text-align: center', 'font-size: 11px', 'color: #ccc',
+            'background: rgba(85, 85, 85, 0.9)', 'border-radius: 4px',
+            'cursor: pointer', 'user-select: none'
+        ].join(';') + ';';
+        toggleBtn.title = '收起 / 展开 UOOC 助手控制条';
+        var setCollapsed = function(collapsed) {
+            checkboxContainer.style.display = collapsed ? 'none' : 'flex';
+            bar.style.left = collapsed ? 'auto' : '0'; // 收起后只占把手宽度、靠右
+            bar.style.padding = collapsed ? '0 4px' : '2px 10px';
+            toggleBtn.innerHTML = collapsed ? '▼' : '▲';
+            try { localStorage.setItem('uooc_bar_collapsed', collapsed ? '1' : '0'); } catch (e) {}
+        };
+        var startCollapsed = false;
+        try { startCollapsed = localStorage.getItem('uooc_bar_collapsed') === '1'; } catch (e) {}
+        toggleBtn.onclick = function() {
+            setCollapsed(checkboxContainer.style.display !== 'none');
+        };
+        bar.appendChild(toggleBtn);
+        setCollapsed(startCollapsed);
 
-        if (head.id !== 'learn-head-fallback') {
-            head.appendChild(toggleBtn);
-
-            // 记录原始高度
-            const originalHeight = head.offsetHeight + 30;
-            head.style.height = originalHeight + 'px';
-
-            // 控制显示/隐藏的函数
-            let isPanelVisible = true;
-            function hidePanel() {
-                if (!isPanelVisible) return;
-                isPanelVisible = false;
-
-                if (headContent) {
-                    headContent.style.maxHeight = '0px';
-                    headContent.style.opacity = '0';
-                    headContent.style.overflow = 'hidden';
-                    headContent.style.transition = 'max-height 0.4s ease, opacity 0.4s ease';
-                }
-
-                checkboxContainer.style.maxHeight = '0px';
-                checkboxContainer.style.opacity = '0';
-                checkboxContainer.style.overflow = 'hidden';
-                checkboxContainer.style.transition = 'max-height 0.4s ease, opacity 0.4s ease';
-
-                head.style.maxHeight = '25px';
-                head.style.opacity = '1';
-
-                toggleBtn.innerHTML = '▼';
-            }
-
-            function showPanel() {
-                if (isPanelVisible) return;
-                isPanelVisible = true;
-
-                if (headContent) {
-                    headContent.style.maxHeight = originalHeight + 'px';
-                    headContent.style.opacity = '1';
-                }
-
-                checkboxContainer.style.maxHeight = originalHeight + 'px';
-                checkboxContainer.style.opacity = '1';
-
-                head.style.maxHeight = originalHeight + 'px';
-                head.style.opacity = '1';
-
-                toggleBtn.innerHTML = '▲';
-            }
-
-            toggleBtn.onclick = function() {
-                if (isPanelVisible) {
-                    hidePanel();
-                } else {
-                    showPanel();
-                }
-            };
-        } else {
-            // fallback模式不隐藏
-            toggleBtn.style.display = 'none';
-        }
-
-        console.log('[UOOC助手] UI组件添加完成');
+        console.log('[UOOC助手] UI组件添加完成 (固定控制条)');
         return true;
     }
 
@@ -3438,110 +3348,87 @@
         ckeckTestIgnorable();
 
         function waitHead() {
-            console.log('[UOOC助手] 等待头部元素...');
+            // 不再等待优课的头部元素: 界面现在挂在 document.body 上的固定控制条里,
+            // 与网站头部有没有渲染出来无关。以前必须先等到 .learn-head 出现(最多 5 秒)才放界面,
+            // 等不到还得走降级分支 —— 这是"界面出现得晚 / 干脆没有"的一大来源。
+            console.log('[UOOC助手] 放置界面（固定控制条，不依赖网站头部）');
+            var uiSuccess = false;
+            try {
+                uiSuccess = placeComponents();
+                if (uiSuccess) bindChapterChange();
+            } catch (e) {
+                console.error('[UOOC助手] 放置界面/绑定章节出错（界面看门狗会兜底重试）:', e);
+            }
+            // ⚠️ 下面这段【不能】用 if (uiSuccess) 包住: 以前一旦 placeComponents 抛异常,
+            // 整条初始化链就断在这里 —— 连 start() 都执行不到, 于是 3 秒轮询/连播/答题
+            // 全部不工作; 而脚本底部那个独立的 2x 倍速模块照常运行, 表现就是
+            // "功能还在、界面没了, 必须刷新"。界面本身改由独立看门狗兜底。
+            {
 
-            // 尝试多个可能的头部选择器 (新旧页面兼容)
-            // 旧页面: .learn-head | 新页面: newlearn-head, .newlearn_head
-            var head = document.querySelector('.learn-head') ||
-                       document.querySelector('.learn-header') ||
-                       document.querySelector('.header') ||
-                       document.querySelector('.control-panel') ||
-                       document.querySelector('newlearn-head') ||
-                       document.querySelector('.newlearn_head');
+                function ready() {
+                    console.log('[UOOC助手] UOOC assistant beta has initialized.');
 
-            if (head) {
-                console.log('[UOOC助手] 找到头部元素，开始放置组件');
-                var uiSuccess = false;
-                try {
-                    uiSuccess = placeComponents();
-                    if (uiSuccess) bindChapterChange();
-                } catch (e) {
-                    console.error('[UOOC助手] 放置界面/绑定章节出错（界面看门狗会兜底重试）:', e);
-                }
-                // ⚠️ 下面这段【不能】用 if (uiSuccess) 包住: 以前一旦 placeComponents 抛异常,
-                // 整条初始化链就断在这里 —— 连 start() 都执行不到, 于是 3 秒轮询/连播/答题
-                // 全部不工作; 而脚本底部那个独立的 2x 倍速模块照常运行, 表现就是
-                // "功能还在、界面没了, 必须刷新"。界面本身改由独立看门狗兜底。
-                {
-
-                    function ready() {
-                        console.log('[UOOC助手] UOOC assistant beta has initialized.');
-
-                        // 检查LLM启用状态和配置
-                        if (window.llmEnabled) {
-                            const config = LLMConfig.get();
-                            if (!config || !config.baseUrl || !config.apiKey) {
-                                console.log('[UOOC助手] LLM已启用但未配置API');
-                                setTimeout(function() {
-                                    alert('LLM答题功能已启用，但尚未配置API参数！\n\n请点击⚙️图标进行配置。');
-                                    LLMConfig.showConfigUI();
-                                }, 1000);
-                            } else {
-                                console.log('[UOOC助手] LLM配置正常，已准备就绪');
-                            }
+                    // 检查LLM启用状态和配置
+                    if (window.llmEnabled) {
+                        const config = LLMConfig.get();
+                        if (!config || !config.baseUrl || !config.apiKey) {
+                            console.log('[UOOC助手] LLM已启用但未配置API');
+                            setTimeout(function() {
+                                alert('LLM答题功能已启用，但尚未配置API参数！\n\n请点击⚙️图标进行配置。');
+                                LLMConfig.showConfigUI();
+                            }, 1000);
+                        } else {
+                            console.log('[UOOC助手] LLM配置正常，已准备就绪');
                         }
+                    }
 
+                    start();
+                }
+
+                // 检测视频元素是否存在 (支持新旧页面)
+                if (document.getElementById('player_html5_api') ||
+                    document.querySelector('video.vjs-tech') ||
+                    document.querySelector('video')) {
+                    ready();
+                } else {
+                    // 新页面可能需要点击视频任务行才加载播放器。
+                    // 只点"未看完的视频任务行"——绝不点知识点标题行:
+                    // 点标题会导航到知识点落地页, 播放器永远出不来
+                    var videoItem = null;
+                    var taskRows = document.querySelectorAll('.basic[ng-click*="goSource"]');
+                    for (var tI = 0; tI < taskRows.length; tI++) {
+                        if (taskRows[tI].querySelector('[class*="icon-video"], [class*="video"]') && !taskRows[tI].classList.contains('complete')) {
+                            videoItem = taskRows[tI];
+                            break;
+                        }
+                    }
+                    if (videoItem) {
+                        console.log('[UOOC助手] 点击未看完的视频任务行:', (videoItem.innerText || '').trim().substring(0, 20));
+                        videoItem.click();
+                        // 延迟检查，SPA异步渲染
+                        var videoReadyAttempts = 0;
+                        var checkVideoReady = function() {
+                            videoReadyAttempts++;
+                            if (document.getElementById('player_html5_api') ||
+                                document.querySelector('video.vjs-tech') ||
+                                document.querySelector('video')) {
+                                ready();
+                            } else if (videoReadyAttempts < 20) {
+                                setTimeout(checkVideoReady, 300);
+                            } else {
+                                console.log('[UOOC助手] 超时未找到视频元素，脚本已初始化但播放器可能尚未就绪');
+                                start();
+                            }
+                        };
+                        setTimeout(checkVideoReady, 300);
+                    } else {
+                        console.log('[UOOC助手] 未找到视频元素/图标，脚本进入监听模式');
+                        // 脚本已初始化，2倍速模块会在视频加载后自动应用
                         start();
                     }
-
-                    // 检测视频元素是否存在 (支持新旧页面)
-                    if (document.getElementById('player_html5_api') ||
-                        document.querySelector('video.vjs-tech') ||
-                        document.querySelector('video')) {
-                        ready();
-                    } else {
-                        // 新页面可能需要点击视频任务行才加载播放器。
-                        // 只点"未看完的视频任务行"——绝不点知识点标题行:
-                        // 点标题会导航到知识点落地页, 播放器永远出不来
-                        var videoItem = null;
-                        var taskRows = document.querySelectorAll('.basic[ng-click*="goSource"]');
-                        for (var tI = 0; tI < taskRows.length; tI++) {
-                            if (taskRows[tI].querySelector('[class*="icon-video"], [class*="video"]') && !taskRows[tI].classList.contains('complete')) {
-                                videoItem = taskRows[tI];
-                                break;
-                            }
-                        }
-                        if (videoItem) {
-                            console.log('[UOOC助手] 点击未看完的视频任务行:', (videoItem.innerText || '').trim().substring(0, 20));
-                            videoItem.click();
-                            // 延迟检查，SPA异步渲染
-                            var videoReadyAttempts = 0;
-                            var checkVideoReady = function() {
-                                videoReadyAttempts++;
-                                if (document.getElementById('player_html5_api') ||
-                                    document.querySelector('video.vjs-tech') ||
-                                    document.querySelector('video')) {
-                                    ready();
-                                } else if (videoReadyAttempts < 20) {
-                                    setTimeout(checkVideoReady, 300);
-                                } else {
-                                    console.log('[UOOC助手] 超时未找到视频元素，脚本已初始化但播放器可能尚未就绪');
-                                    start();
-                                }
-                            };
-                            setTimeout(checkVideoReady, 300);
-                        } else {
-                            console.log('[UOOC助手] 未找到视频元素/图标，脚本进入监听模式');
-                            // 脚本已初始化，2倍速模块会在视频加载后自动应用
-                            start();
-                        }
-                    }
-                }
-            } else {
-                // 超过一定时间后仍找不到头部元素，创建fallback
-                var elapsedAttempts = (window.__initAttemptCount || 0) + 1;
-                window.__initAttemptCount = elapsedAttempts;
-
-                if (elapsedAttempts > 20) {
-                    console.warn('[UOOC助手] 经过多次尝试仍未找到头部元素，创建fallback容器');
-                    placeComponents();
-                    bindChapterChange();
-                    start();
-                } else {
-                    setTimeout(waitHead, 250);
                 }
             }
-        }
+    }
         waitHead();
     }
 
@@ -3624,7 +3511,10 @@
     if (!window.__uoocUiWatchdog) {
         window.__uoocUiWatchdog = setInterval(function() {
             try {
-                if (document.getElementById('checkbox-container')) return; // 界面在, 不打扰
+                var box = document.getElementById('checkbox-container');
+                var bar = document.getElementById('uooc-helper-bar');
+                // 界面在页面上(容器挂在 body 的固定条里) → 不打扰
+                if (box && bar && document.body.contains(bar)) return;
                 if (!window.__uoocUiWatchdogAt || Date.now() - window.__uoocUiWatchdogAt > 3000) {
                     window.__uoocUiWatchdogAt = Date.now();
                     console.log('[UOOC助手] 看门狗: 界面上找不到 UI 组件，正在重新放置...');
