@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.8.0
-// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+固定2倍速(更高倍速会被平台判为无效观看)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
+// @version      2.8.1
+// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+固定2.25倍速(实测2x/2.25x正常打勾,更高倍速会被平台判为无效观看)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
 // @include      https://www.uooc.net.cn/home/course/exam/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.8.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.8.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1684,11 +1684,12 @@
         return v;
     }
 
-    // 统一固定 2 倍速。
-    // 4x/3x 实测会被平台判为无效观看：视频播完侧栏不打勾(等于白刷),
-    // 而且高倍速本身就是风控关注点 → 直接去掉倍速条, 只保留"是否自动 2 倍速"这个开关。
+    // 统一固定倍速 —— 只此一处, 以后想调就改这一个数字。
+    // 实测: 2x / 2.25x 播完平台正常打勾; 4x 会被判为无效观看(视频不打勾 = 白刷),
+    // 且高倍速本身就是风控关注点 → 去掉倍速条, 只保留这一档固定值。
+    var FIXED_RATE = 2.25;
     function getUoocRate() {
-        return 2;
+        return FIXED_RATE;
     }
 
     // 把倍速应用到当前视频 (原生属性 + videojs 双通道)
@@ -2434,8 +2435,8 @@
             var rateCheckbox = getCheckbox('rate', '倍速');
             // 倍速条已移除: 统一 2 倍速(更高倍速会被平台判为无效观看, 且属风控关注点)
             var rateLabel = document.createElement('label');
-            rateLabel.innerText = '2x';
-            rateLabel.title = '已统一固定 2 倍速：4x/3x 实测播完不打勾（等于白刷），且高倍速容易触发风控';
+            rateLabel.innerText = FIXED_RATE + 'x';
+            rateLabel.title = '倍速已固定为 ' + FIXED_RATE + 'x（倍速条已移除）：实测 2x/2.25x 正常打勾，4x 会被判无效观看且容易触发风控';
             rateLabel.style = 'margin-left: 10px; font-size: 12px; color: #ffd54a;';
             rateCheckbox.appendChild(rateLabel);
             // 清掉旧版本存过的倍速设置, 免得残留值再被别处读到
@@ -2698,7 +2699,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.1';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
