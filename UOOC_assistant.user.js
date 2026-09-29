@@ -1163,11 +1163,44 @@
         const filledCount = fillAnswers(questions, answers);
         console.log('[UOOC助手-AI] 填充结果: 共填入', filledCount, '个答案，共', questions.length, '道题');
         window.__uoocLastFillResult = { filled: filledCount, total: questions.length };
+        window.__uoocExamSubmitted = false;
 
-        // 提示用户检查并提交 (始终附带逐题情况, 部分填入时也能定位漏题原因)
-        // 若答题期间用户已切走 (连播推进到别处), 不再弹窗打扰, 只写控制台
-        // 连播的"测验自动完成"流程中 (__uoocSilentAnswer) 也不弹窗
+        // 自动提交试卷 (UI "自动提交"勾选时；连播测验流程强制走这里)
+        // 流程: 填完 → 覆盖原生 confirm → 点"提交试卷" → 点确认弹层 → 置已提交标志
+        var wantAutoSubmit = localStorage.getItem('uooc_autosubmit') !== '0' || window.__uoocSilentAnswer === true;
         setTimeout(function() {
+            var exam = (wantAutoSubmit && filledCount > 0) ? findExamIframeDoc() : null;
+            if (exam) {
+                console.log('[UOOC助手-AI] 自动提交已开启，正在提交试卷...');
+                try { exam.win.confirm = function() { return true; }; } catch (e) {}
+                var submitBtn = findButtonByText(exam.doc, '提交试卷');
+                if (!submitBtn) {
+                    console.log('[UOOC助手-AI] 未找到"提交试卷"按钮，请手动提交');
+                    return;
+                }
+                submitBtn.click();
+                var tries = 10;
+                var timer = setInterval(function() {
+                    tries--;
+                    var okBtn = null;
+                    var layerBtns = exam.doc.querySelectorAll('.layui-layer-btn a, .layui-layer button');
+                    for (var k = 0; k < layerBtns.length; k++) {
+                        var t = (layerBtns[k].innerText || '').trim();
+                        if (t.indexOf('确定') >= 0 || t.indexOf('确认') >= 0) { okBtn = layerBtns[k]; break; }
+                    }
+                    if (okBtn) {
+                        clearInterval(timer);
+                        okBtn.click();
+                        window.__uoocExamSubmitted = true;
+                        console.log('[UOOC助手-AI] ✅ 试卷已自动提交');
+                    } else if (tries <= 0) {
+                        clearInterval(timer);
+                        console.log('[UOOC助手-AI] 未检测到确认弹层（可能未直接弹出）');
+                    }
+                }, 1000);
+                return;
+            }
+            // 未开启自动提交 (或一题没填上) → 提示手动处理
             let msg = `✅ AI答题完成！\n\n已自动填入 ${filledCount}/${questions.length} 个答案。`;
             const raw = String(window.__uoocLastLLMResponse || '');
             if (raw) {
@@ -1184,7 +1217,7 @@
             } else {
                 console.log('[UOOC助手-AI] 已离开答题页面，答案已填入但不再弹窗:', msg.replace(/\n/g, ' '));
             }
-        }, 500);
+        }, 800);
     }
 
     // 在测评页面显示提示
@@ -1901,6 +1934,8 @@
 
         console.log('[UOOC助手] 测验页已就绪，开始 AI 答题...');
         window.__uoocSilentAnswer = true;
+        window.__uoocAnswerBusy = true;
+        window.__uoocExamSubmitted = false;
         autoAnswerQuiz().then(function() {
             window.__uoocAnswerBusy = false;
             var res = window.__uoocLastFillResult || { filled: 0, total: 0 };
@@ -1911,24 +1946,12 @@
                 window.__uoocNavPending = false;
                 return;
             }
-            // 提交: 先覆盖原生 confirm, 再点"提交试卷", 再点确认弹层
-            try { exam.win.confirm = function() { return true; }; } catch (e) {}
-            var submitBtn = findButtonByText(exam.doc, '提交试卷');
-            if (!submitBtn) { console.log('[UOOC助手] 未找到"提交试卷"按钮，请你手动提交'); window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
-            submitBtn.click();
-            console.log('[UOOC助手] 已点击提交试卷，等待确认弹层...');
-            var confirmTries = 8;
-            var confirmTimer = setInterval(function() {
-                confirmTries--;
-                var okBtn = null;
-                var layerBtns = exam.doc.querySelectorAll('.layui-layer-btn a, .layui-layer button, .layui-layer input[type="button"]');
-                for (var k = 0; k < layerBtns.length; k++) {
-                    var t = (layerBtns[k].innerText || layerBtns[k].value || '').trim();
-                    if (t.indexOf('确定') >= 0 || t.indexOf('确认') >= 0) { okBtn = layerBtns[k]; break; }
-                }
-                if (okBtn) {
-                    clearInterval(confirmTimer);
-                    okBtn.click();
+            // 提交已在 autoAnswerQuiz 内部完成 (静默模式强制自动提交) — 这里等提交完成标志
+            var waitTries = 75; // 最长约 2.5 分钟
+            var waitTimer = setInterval(function() {
+                waitTries--;
+                if (window.__uoocExamSubmitted) {
+                    clearInterval(waitTimer);
                     console.log('[UOOC助手] 测验已自动提交，6 秒后继续连播');
                     setTimeout(function() {
                         window.__uoocSilentAnswer = false;
@@ -1936,17 +1959,13 @@
                         window.__uoocLastForwardClick = Date.now();
                         findNextVideo();
                     }, 6000);
-                } else if (confirmTries <= 0) {
-                    clearInterval(confirmTimer);
-                    console.log('[UOOC助手] 未检测到确认弹层（可能已直接提交），8 秒后继续连播');
-                    setTimeout(function() {
-                        window.__uoocSilentAnswer = false;
-                        window.__uoocNavPending = false;
-                        window.__uoocLastForwardClick = Date.now();
-                        findNextVideo();
-                    }, 8000);
+                } else if (waitTries <= 0) {
+                    clearInterval(waitTimer);
+                    console.log('[UOOC助手] 等待自动提交超时，请你手动提交；连播停止');
+                    window.__uoocSilentAnswer = false;
+                    window.__uoocNavPending = false;
                 }
-            }, 1000);
+            }, 2000);
         });
     }
 
@@ -2343,6 +2362,23 @@
 
             llmContainer.appendChild(autoAnswerCheckbox);
             llmContainer.appendChild(autoAnswerLabel);
+
+            // 自动提交复选框 (默认开启): LLM 填完答案后自动点"提交试卷"并确认
+            var autoSubmitCheckbox = document.createElement('input');
+            autoSubmitCheckbox.id = 'autosubmit';
+            autoSubmitCheckbox.type = 'checkbox';
+            autoSubmitCheckbox.checked = localStorage.getItem('uooc_autosubmit') !== '0';
+            autoSubmitCheckbox.style = 'width: 12px; height: 12px; margin-left: 8px;';
+            autoSubmitCheckbox.onchange = function(event) {
+                localStorage.setItem('uooc_autosubmit', event.target.checked ? '1' : '0');
+                console.log('[UOOC助手] 自动提交试卷:', event.target.checked ? '已开启' : '已关闭');
+            };
+            var autoSubmitLabel = document.createElement('label');
+            autoSubmitLabel.innerText = '自动提交';
+            autoSubmitLabel.style = 'margin-left: 5px; font-size: 12px; color: #17a2b8;';
+            autoSubmitLabel.title = 'LLM 答题完成后自动点击"提交试卷"并确认（提交后无法修改答案，慎关慎开）';
+            llmContainer.appendChild(autoSubmitCheckbox);
+            llmContainer.appendChild(autoSubmitLabel);
 
             if (rateCheckbox.firstElementChild) {
                 rateCheckbox.firstElementChild.onchange = function(event) {
