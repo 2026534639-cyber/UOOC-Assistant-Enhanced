@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.8.3
+// @version      2.8.4
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.8.3 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.8.4 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2328,6 +2328,18 @@
                         waitCurrentTaskDone(function() { findNextVideo(); });
                     }
                 } catch(e) {}
+                // 界面自愈: Angular 重新渲染 header 时会把注入的界面节点一起冲掉 ——
+                // 表现就是"功能还在(静音/倍速照常生效)，但界面不见了，必须刷新页面"。
+                // 每 3 秒查一次, 发现界面不在了就重新放置 (placeComponents 已做成可重入)。
+                try {
+                    if (!document.getElementById('checkbox-container')) {
+                        if (!window.__uoocUiRepairAt || Date.now() - window.__uoocUiRepairAt > 5000) {
+                            window.__uoocUiRepairAt = Date.now();
+                            console.log('[UOOC助手] 界面节点不见了（被页面重渲染冲掉），正在重新放置界面...');
+                            placeComponents();
+                        }
+                    }
+                } catch (e) { console.warn('[UOOC助手] 重新放置界面失败:', e); }
             }, 3000);
         }
 
@@ -2383,6 +2395,23 @@
 
     function placeComponents() {
         console.log('[UOOC助手] 开始放置UI组件');
+
+        // 重入安全: 本函数现在会被"界面自愈"重复调用(见 3 秒轮询)。
+        // 先把上一轮注入的壳拆干净, 否则每重入一次就把 headContent 多套一层:
+        //   · #head-content-wrapper 里装的是页面原有内容 → 挪回原父节点后再删壳
+        //   · #checkbox-container / #control-panel-toggle 是纯注入物 → 直接删
+        (function cleanPreviousInjection() {
+            var wrapper = document.getElementById('head-content-wrapper');
+            if (wrapper && wrapper.parentNode) {
+                var parent = wrapper.parentNode;
+                while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
+                parent.removeChild(wrapper);
+            }
+            ['checkbox-container', 'control-panel-toggle'].forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el && el.parentNode) el.parentNode.removeChild(el);
+            });
+        })();
 
         function copyToClipboard(content) {
             var t = document.createElement('textarea');
@@ -2746,7 +2775,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.3';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.4';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2762,6 +2791,10 @@
                    document.querySelector('[class*="learn-head"]') ||
                    document.querySelector('[class*="control-panel"]');
 
+        if (!head) {
+            // 降级: 优先复用上一轮创建的固定容器 (自愈重入时不要叠出好几个)
+            head = document.getElementById('learn-head-fallback');
+        }
         if (!head) {
             // 降级: 在页面顶部创建固定容器
             console.log('[UOOC助手] 未找到.learn-head元素，创建顶部固定容器...');
