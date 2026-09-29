@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.8.1
+// @version      2.8.2
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+固定2.25倍速(实测2x/2.25x正常打勾,更高倍速会被平台判为无效观看)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.8.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.8.2 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2103,8 +2103,12 @@
             return;
         }
         var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
-        var ue = (typeof getUeditorInstance === 'function') ? getUeditorInstance() : null;
-        if (!topic || !ue) {
+        // 新版讨论页回复框是普通 textarea(不再是 UEditor) —— 判据要跟着改,
+        // 否则在没有 UE 实例的页面上会被误判成"未就绪"而跳过整个讨论
+        var replyBox = document.querySelector('.replay-editor textarea[ng-model="content"]') ||
+                       document.querySelector('.replay-editor-area textarea') ||
+                       (typeof getUeditorInstance === 'function' ? getUeditorInstance() : null);
+        if (!topic || !replyBox) {
             // 页面还在加载 → 等待; 超时 → 跳过该讨论继续连播 (讨论不挡视频)
             if (attempts > 0) { setTimeout(() => autoDiscussContinueFlow(attempts - 1), 2000); return; }
             console.log('[UOOC助手] 讨论页未就绪，跳过继续连播');
@@ -2180,11 +2184,29 @@
         var exam = findExamIframeDoc();
         if (!exam) {
             if (attempts > 0) { setTimeout(() => autoCompleteQuizFlow(attempts - 1), 2000); }
-            else { console.log('[UOOC助手] 等待测验页面加载超时，连播停止'); window.__uoocNavPending = false; }
+            else {
+                // 诊断: 把页面上的 iframe 都列出来, 好判断是"卷子没加载"还是"判据没匹配上"
+                var frames = Array.from(document.querySelectorAll('iframe')).map(function(f) {
+                    var cnt = null;
+                    try { cnt = (f.contentDocument || f.contentWindow.document).querySelectorAll('.queContainer').length; } catch (e) { cnt = 'X'; }
+                    return (f.getAttribute('src') || '(no src)').slice(0, 60) + ' [que=' + cnt + ']';
+                });
+                console.log('[UOOC助手] 找不到试卷 iframe（等待超时），连播停止。当前 iframe:', frames.join(' | ') || '无');
+                console.log('[UOOC助手] 若上面某个 iframe 的 que 数 > 0 却没被识别，请把这一行发给维护者');
+                window.__uoocNavPending = false;
+                window.__uoocAnswerBusy = false;
+                window.__uoocSilentAnswer = false;
+            }
             return;
         }
         if (exam.doc.querySelectorAll('.queContainer').length === 0) {
             if (attempts > 0) { setTimeout(() => autoCompleteQuizFlow(attempts - 1), 2000); }
+            else {
+                console.log('[UOOC助手] 试卷 iframe 已找到，但里面没有 .queContainer（题目没渲染出来），连播停止');
+                window.__uoocNavPending = false;
+                window.__uoocAnswerBusy = false;
+                window.__uoocSilentAnswer = false;
+            }
             return;
         }
 
@@ -2222,6 +2244,13 @@
                     window.__uoocNavPending = false;
                 }
             }, 2000);
+        }).catch(function(e) {
+            // 不接住异常的话 __uoocAnswerBusy 会一直是 true,
+            // 之后所有"自动答题"都会被轮询的让路判断永久挡住
+            console.error('[UOOC助手] 测验自动完成出错:', e);
+            window.__uoocAnswerBusy = false;
+            window.__uoocSilentAnswer = false;
+            window.__uoocNavPending = false;
         });
     }
 
@@ -2699,7 +2728,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.1';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.2';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2919,11 +2948,19 @@
     function findNextVideo() {
         var video = document.getElementById('player_html5_api') ||
                     document.querySelector('video.vjs-tech');
+        var continueBox = document.getElementById('continue');
 
-        if (video) {
-            if (!document.getElementById('continue') || !document.getElementById('continue').checked) {
-                video.currentTime = 0;
-            } else {
+        // 连播没开: 有视频就回到开头, 然后结束 (原行为)
+        if (!continueBox || !continueBox.checked) {
+            if (video) video.currentTime = 0;
+            return;
+        }
+
+        // ⚠️ 下面的目录扫描绝不能被 if (video) 包住:
+        // 测验页 / 讨论页本身【没有 <video> 元素】, 旧写法把整段扫描塞在 if (video) 里,
+        // 于是"测验提交完 / 讨论发完"再调本函数时直接返回、什么都不做 ——
+        // 表现就是"它自己提交完答案后不会接着连播，得手动点一下才继续"。
+        {
                 let current_video = document.querySelector('.basic.active');
                 if (!current_video) {
                     // 尝试备用选择器
@@ -3165,9 +3202,23 @@
                         startIdx = cur + 1;
                     }
 
+                    // 只用于日志: 找这一行最近的上级标题, 让"跳过/进入"能看出是哪一章
+                    let labelOf = (idx) => {
+                        for (let k = Math.min(idx, rows.length - 1); k >= 0; k--) {
+                            if ((rows[k].getAttribute('ng-click') || '').indexOf('toggleChapter') >= 0) {
+                                return normLabel(rows[k].innerText);
+                            }
+                        }
+                        return '';
+                    };
                     for (let i = startIdx; i < rows.length; i++) {
                         let row = rows[i];
                         let ng = row.getAttribute('ng-click') || '';
+                        // 已打勾=该任务已完成: 视频不重看、测验不重答、讨论不重发, 直接跳过继续找下一个
+                        if (ng.indexOf('goSource') >= 0 && row.classList.contains('complete')) {
+                            console.log('[UOOC助手] 跳过已完成的任务:', labelOf(i), '›', normLabel(row.innerText));
+                            continue;
+                        }
                         if (ng.indexOf('toggleChapter') >= 0) {
                             // 已展开 (下一行缩进更深) → 直接继续扫它的子级
                             // 只对【折叠的】标题点一下进入下一层; 对已展开的绝不能再点,
@@ -3241,7 +3292,6 @@
                 } catch (err) {
                     console.error('[UOOC助手] 查找下一个视频出错:', err);
                 }
-            }
         }
     }
 
