@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.6.0
+// @version      2.6.1
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.6.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.6.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -328,7 +328,7 @@
                 '<b style="color:#ffd54a;">📊 学习进度</b>' +
                 '<span id="uooc-progress-close" style="cursor:pointer;color:#aaa;font-size:15px;padding:0 4px;" title="关闭">×</span></div>' +
                 '<div id="uooc-progress-body">统计中...</div>' +
-                '<div style="color:#888;font-size:10px;margin-top:4px;">以当前展开的目录为准</div>';
+                '<div style="color:#888;font-size:10px;margin-top:4px;">全课程数据 · 每60秒自动刷新</div>';
             document.body.appendChild(panel);
             document.getElementById('uooc-progress-close').onclick = function() {
                 panel.style.display = 'none';
@@ -340,16 +340,28 @@
     function refreshProgressPanel() {
         var panel = document.getElementById('uooc-progress-panel');
         if (!panel || panel.style.display === 'none') return; // 关闭状态不刷新
-        var p = collectProgress();
         var body = document.getElementById('uooc-progress-body');
-        if (!body) return;
-        if (p.videoTotal === 0 && p.quizTotal === 0) {
-            body.innerHTML = '<span style="color:#999;">未检测到任务点</span>';
-            return;
-        }
-        body.innerHTML =
-            '📹 视频: <b style="color:#7CFC00;">' + p.videoDone + '</b> / ' + p.videoTotal + ' 已看<br>' +
-            '📝 测验: <b style="color:#7CFC00;">' + p.quizDone + '</b> / ' + p.quizTotal + ' 已完成';
+        if (!body || body.dataset.loading === '1') return;
+        body.dataset.loading = '1';
+        body.innerHTML = '<span style="color:#999;">正在获取全课程数据...</span>';
+        getCatalogListData().then(function(json) {
+            delete body.dataset.loading;
+            var chapters = json && (json.data || json);
+            if (!Array.isArray(chapters)) { body.innerHTML = '<span style="color:#f88;">课程数据获取失败</span>'; return; }
+            var p = computeCourseProgressFromTree(chapters);
+            body.innerHTML =
+                '📹 视频: <b style="color:#7CFC00;">' + p.videoDone + '</b> / ' + p.videoTotal + ' 已看完<br>' +
+                '📝 测验: <b style="color:#7CFC00;">' + p.quizDone + '</b> / ' + p.quizTotal + ' 已完成<br>' +
+                '📚 知识点: <b style="color:#7CFC00;">' + p.pointsDone + '</b> / ' + p.pointsTotal +
+                (p.pointsLearning ? ' <span style="color:#ffd54a;">(学习中 ' + p.pointsLearning + ')</span>' : '') +
+                '<div style="color:#888;font-size:10px;margin-top:4px;">全课程数据 · 每60秒刷新</div>';
+        }).catch(function(e) {
+            delete body.dataset.loading;
+            // 接口失败 → 退回侧栏可见任务统计
+            var p = collectProgress();
+            body.innerHTML = '📹 视频: ' + p.videoDone + ' / ' + p.videoTotal + '<br>📝 测验: ' + p.quizDone + ' / ' + p.quizTotal +
+                '<div style="color:#f88;font-size:10px;margin-top:4px;">全课程数据获取失败，显示当前展开部分</div>';
+        });
     }
 
     // 获取测评页面的document（可能是iframe）
@@ -2509,7 +2521,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.6.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.6.1';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
