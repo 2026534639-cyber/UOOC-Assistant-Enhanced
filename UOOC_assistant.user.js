@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.9.0
+// @version      2.9.1
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.9.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.9.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2056,52 +2056,46 @@
         return true;
     }
 
+    // ==================== 讨论清扫（只刷讨论） ====================
+    // 使用场景: 视频/测验都已经刷完, 只剩讨论没做 —— 点一下「💬 自动讨论」,
+    // 脚本从当前讨论开始发 3 条, 然后自动去找下一个讨论、再发 3 条……直到没有讨论为止。
+    // 期间 window.__uoocOnlyDiscussions = true, 扫描会把视频与测验直接跳过。
+    function stopDiscussSweep(msg) {
+        window.__uoocDiscussSweep = false;
+        window.__uoocOnlyDiscussions = false;
+        window.__uoocSilentAnswer = false;
+        window.__uoocNavPending = false;
+        if (window.__uoocDiscussBtn) {
+            window.__uoocDiscussBtn.innerText = '💬 自动讨论';
+            window.__uoocDiscussBtn.title = '自动讨论：从当前讨论开始，自动依次处理后面的所有讨论（每个发 3 条）。需先打开一个"讨论"任务点页面';
+        }
+        var n = window.__uoocSweepPosted || 0;
+        console.log('[UOOC助手-讨论] ' + (msg || '讨论清扫结束') + '，本次共处理 ' + n + ' 个讨论');
+        if (msg) alert(msg + '\n本次共处理 ' + n + ' 个讨论');
+    }
+
     function autoDiscussFlow() {
+        // 再点一次 = 停止
+        if (window.__uoocDiscussSweep) { stopDiscussSweep('已手动停止讨论清扫'); return; }
+
         var topic = getDiscussionTopic();
         if (!topic) {
-            alert('没有识别到讨论话题，请先打开一个"讨论"页面再点本按钮');
+            alert('没有识别到讨论话题，请先打开一个"讨论"任务点页面再点本按钮');
             return;
         }
-        var existing = getExistingReplies();
-        var count = 3;
-        var ask = '检测到讨论话题：\n\n' + topic.substring(0, 150) + '\n\n讨论区已有 ' + existing.length + ' 条发言（新发言会自动避开它们的观点）。\n将自动发布 ' + count + ' 条不同角度的简短发言（每条 1-2 句）。\n注意：优课会用 AI 评估发言质量。确定执行？';
-        if (!window.confirm(ask)) return;
+        if (!window.confirm('将从当前讨论开始，自动依次处理后面的所有讨论（每个发 3 条不同角度的简短发言，会先读取已有发言并避开重复观点）。\n\n期间请勿关闭页面，再点一次按钮可停止。确定执行？')) return;
 
-        var prompt = buildDiscussPrompt(topic, existing, count);
-        function startPosting(list) {
-            console.log('[UOOC助手-讨论] 生成 ' + list.length + ' 条不重复发言，开始逐条发布');
-            var i = 0;
-            function postNext() {
-                if (i >= list.length) { alert('✅ 自动讨论完成，已发布 ' + list.length + ' 条发言'); return; }
-                var ok = postDiscussionReply(list[i]);
-                if (ok) {
-                    console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', list[i]);
-                    i++;
-                    setTimeout(postNext, 6000 + Math.floor(Math.random() * 6000));
-                } else {
-                    alert('编辑器不可用，发布中止');
-                }
-            }
-            postNext();
+        window.__uoocDiscussSweep = true;
+        window.__uoocOnlyDiscussions = true;   // 扫描只认讨论，视频/测验一律跳过
+        window.__uoocSweepPosted = 0;
+        window.__uoocSweptHashes = {};
+        window.__uoocAutoChainStopped = false;
+        if (window.__uoocDiscussBtn) {
+            window.__uoocDiscussBtn.innerText = '💬 停止讨论';
+            window.__uoocDiscussBtn.title = '讨论清扫进行中，点击停止';
         }
-
-        callLLMText(prompt).then(function(resp) {
-            var fresh = parseNumberedReplies(resp, count).filter(function(r) {
-                return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
-            });
-            if (fresh.length === 0) {
-                var prompt2 = prompt + '\n\n注意：你上次生成的发言与已有发言重复了。这次必须给出全新的信息量（举具体函数/数列例子、左右极限分别考虑、或指出容易忽略的特殊情况）。';
-                callLLMText(prompt2).then(function(resp2) {
-                    var fresh2 = parseNumberedReplies(resp2, count).filter(function(r) {
-                        return !isDuplicateReply(r, existing) && !isDuplicateReply(r, fresh);
-                    });
-                    if (fresh2.length === 0) { alert('AI 生成的发言与已有发言重复，已取消发布。请稍后再试或手动发言'); return; }
-                    startPosting(fresh2);
-                }).catch(function(e) { alert('AI 调用失败: ' + e.message); });
-            } else {
-                startPosting(fresh);
-            }
-        }).catch(function(e) { alert('AI 调用失败: ' + e.message); });
+        console.log('[UOOC助手-讨论] 开始讨论清扫（只刷讨论，跳过视频与测验）');
+        autoDiscussContinueFlow(8);
     }
 
     // ==================== 连播遇测验：自动完成流程 ====================
@@ -2132,11 +2126,23 @@
     // 连播勾选中时: 进入讨论页 → 识别话题 → AI 生成 3 条学生口吻短发言 → 逐条发布 → 继续连播
     function autoDiscussContinueFlow(attempts) {
         var continueBox = document.getElementById('continue');
-        if (!continueBox || !continueBox.checked) {
+        // 讨论清扫模式下不要求勾「全自动」——按钮本身就是启动开关
+        if ((!continueBox || !continueBox.checked) && !window.__uoocDiscussSweep) {
             window.__uoocSilentAnswer = false;
             window.__uoocNavPending = false;
             console.log('[UOOC助手] 连播已取消，停止讨论自动发布');
             return;
+        }
+        // 清扫模式: 记录已处理过的讨论页, 防止"点回同一个讨论"造成死循环
+        if (window.__uoocDiscussSweep) {
+            window.__uoocSweptHashes = window.__uoocSweptHashes || {};
+            var curHash = location.hash || '';
+            if (window.__uoocSweptHashes[curHash]) {
+                stopDiscussSweep('检测到又回到同一个讨论，为避免死循环已停止');
+                return;
+            }
+            window.__uoocSweptHashes[curHash] = true;
+            console.log('[UOOC助手-讨论] 清扫中，处理讨论:', curHash.slice(0, 70));
         }
         var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
         // 新版讨论页回复框是普通 textarea(不再是 UEditor) —— 判据要跟着改,
@@ -2174,9 +2180,11 @@
             var i = 0;
             function postNext() {
                 var cb = document.getElementById('continue');
-                if (!cb || !cb.checked) { window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
+                if (!window.__uoocDiscussSweep && (!cb || !cb.checked)) { window.__uoocSilentAnswer = false; window.__uoocNavPending = false; return; }
                 if (i >= fresh.length) {
-                    console.log('[UOOC助手-讨论] 本讨论自动发布完成 (' + fresh.length + ' 条)，5 秒后继续连播');
+                    if (window.__uoocDiscussSweep) window.__uoocSweepPosted = (window.__uoocSweepPosted || 0) + 1;
+                    console.log('[UOOC助手-讨论] 本讨论自动发布完成 (' + fresh.length + ' 条)' +
+                                (window.__uoocDiscussSweep ? '，5 秒后自动找下一个讨论' : '，5 秒后继续连播'));
                     setTimeout(function() {
                         window.__uoocSilentAnswer = false;
                         window.__uoocNavPending = false;
@@ -2813,6 +2821,7 @@
             discussBtn.onclick = function() {
                 if (typeof autoDiscussFlow === 'function') autoDiscussFlow();
             };
+            window.__uoocDiscussBtn = discussBtn; // 清扫进行中要改按钮文案
             container.appendChild(discussBtn);
         }
 
@@ -2825,7 +2834,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.1';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
@@ -2954,8 +2963,10 @@
                     document.querySelector('video.vjs-tech');
         var continueBox = document.getElementById('continue');
 
-        // 连播没开: 有视频就回到开头, 然后结束 (原行为)
-        if (!continueBox || !continueBox.checked) {
+        // 连播没开: 有视频就回到开头, 然后结束 (原行为)。
+        // 例外: 讨论清扫模式由「💬 自动讨论」按钮启动, 不要求勾「全自动」
+        var autoNext = Boolean(continueBox && continueBox.checked) || Boolean(window.__uoocDiscussSweep);
+        if (!autoNext) {
             if (video) video.currentTime = 0;
             return;
         }
@@ -3245,6 +3256,10 @@
                         }
                         if (ng.indexOf('goSource') >= 0) {
                             if (isVideo(row)) {
+                                if (window.__uoocOnlyDiscussions) {
+                                    console.log('[UOOC助手-讨论] 清扫模式跳过视频:', labelOf(i));
+                                    continue;
+                                }
                                 window.__uoocNavPending = false;
                                 window.__uoocAutoChainStopped = false; // 主动前进 = 视为重新开始连播
                                 window.__uoocLastForwardClick = Date.now();
@@ -3253,6 +3268,10 @@
                                 return;
                             }
                             if (isQuizLike(row)) {
+                                if (window.__uoocOnlyDiscussions) {
+                                    console.log('[UOOC助手-讨论] 清扫模式跳过测验:', labelOf(i));
+                                    continue;
+                                }
                                 // 连播遇到测验: 进入并自动完成 (AI 填答 + 自动提交), 而不是跳过卡住
                                 console.log('[UOOC助手] 连播遇到测验，进入并自动完成');
                                 window.__uoocNavPending = true;
@@ -3289,6 +3308,10 @@
                         // 其他行: 跳过
                     }
                     window.__uoocNavPending = false;
+                    if (window.__uoocDiscussSweep) {
+                        stopDiscussSweep('后续没有更多讨论了，讨论清扫完成');
+                        return;
+                    }
                     console.log('[UOOC助手] 后续没有可自动播放的视频，连播停止');
                 };
                 try {
