@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.7.0
+// @version      2.7.1
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.7.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.7.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1753,11 +1753,22 @@
     // ==================== 自动讨论：识别话题 → 多角度短发言 → 逐条发布 ====================
     // 注意: 优课会用 AI 评估讨论发言质量并打击 AI 生成内容,
     // 所以生成的发言刻意保持学生口吻 (1-2 句、口语化、不同角度、无套话)
+    // 讨论话题：新版讨论页结构 = .thesis > h2.thesis-title(标题) + .thesis-content(正文, ng-bind-html)
+    // 旧的"全页扫叶子节点找疑问句"经常一个都匹配不到（正文节点带子元素，被"只看叶子"过滤掉了），
+    // 于是一到讨论页就报"没有识别到讨论话题"。这里改为直接按结构取，旧启发式只作兜底。
     function getDiscussionTopic() {
+        var titleEl = document.querySelector('.thesis .thesis-title') || document.querySelector('h2.thesis-title');
+        var bodyEl = document.querySelector('.thesis .thesis-content') || document.querySelector('.thesis-content');
+        var title = titleEl ? (titleEl.innerText || '').trim() : '';
+        var body = bodyEl ? (bodyEl.innerText || '').trim() : '';
+        if (title && body) return title + '：' + body;
+        if (body) return body;
+        if (title) return title;
+        // 兜底：旧页面结构
         const els = document.querySelectorAll('div, p, span');
         for (let i = 0; i < els.length; i++) {
             const el = els[i];
-            if (el.children.length > 0) continue; // 只看叶子节点
+            if (el.children.length > 0) continue;
             const t = (el.innerText || '').trim();
             if (t.length >= 15 && t.length <= 300 && (t.indexOf('？') >= 0 || t.indexOf('吗') >= 0 || t.indexOf('谈谈') >= 0)) {
                 return t;
@@ -1766,10 +1777,18 @@
         return null;
     }
 
-    // 收集讨论区已有发言 (用于去重: 同质化发言会被优课 AI 审查标记)
+    // 收集讨论区已有发言（用于去重: 同质化发言会被优课 AI 审查标记）
+    // 新版每条回复正文在 .Reply-item-content；旧的全页扫叶子会把话题正文、侧栏目录、脚本自身 UI 一起收进来
     function getExistingReplies() {
         const seen = new Set();
         const out = [];
+        document.querySelectorAll('.Reply-item-content').forEach(function(el) {
+            const t = (el.innerText || '').trim();
+            if (t.length < 4 || seen.has(t)) return;
+            seen.add(t);
+            out.push(t);
+        });
+        if (out.length > 0) return out;
         document.querySelectorAll('div, p, li').forEach(function(el) {
             if (el.children.length > 0) return;
             const t = (el.innerText || '').trim();
@@ -1852,6 +1871,7 @@
         });
     }
 
+    // UEditor 实例（只有部分页面用；新版讨论回复框是普通 textarea，见 postDiscussionReply）
     function getUeditorInstance() {
         try {
             if (window.UE && window.UE.instants) {
@@ -1865,7 +1885,34 @@
         return null;
     }
 
+    // 往回复框写文字：直接赋 value 不会触发 AngularJS 的 ng-model，
+    // 必须再派发 input 事件（ngModel 监听 input），再保险地写一次 scope。
+    function setReplyText(ta, text) {
+        ta.value = text;
+        try { ta.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+        try {
+            if (window.angular) {
+                var sc = window.angular.element(ta).scope();
+                if (sc) { sc.content = text; if (!sc.$$phase) sc.$apply(); }
+            }
+        } catch (e) {} // digest 进行中时 $apply 会抛错，忽略即可（input 事件已经同步）
+    }
+
+    // 新版讨论页：回复框 = .replay-editor-area > textarea[ng-model="content"]
+    //              提交按钮 = button.replay-editor-btn (ng-click="handelReplay()")
+    // 旧实现只往 UEditor 里 setContent，那个实例不是回复框 → 点发布没任何反应
     function postDiscussionReply(text) {
+        var ta = document.querySelector('.replay-editor textarea[ng-model="content"]')
+              || document.querySelector('.replay-editor-area textarea')
+              || document.querySelector('textarea[ng-model="content"]');
+        if (ta) {
+            setReplyText(ta, text);
+            var btn = document.querySelector('.replay-editor .replay-editor-btn') || document.querySelector('.replay-editor-btn');
+            if (!btn) return false;
+            btn.click();
+            return true;
+        }
+        // 兜底：老页面仍是 UEditor
         var ue = getUeditorInstance();
         if (!ue) return false;
         try {
@@ -1873,9 +1920,9 @@
                 try { ue.setContent('<p>' + text + '</p>'); } catch (e) {}
             });
         } catch (e) { return false; }
-        var btn = document.querySelector('.replay-editor-btn');
-        if (!btn) return false;
-        btn.click();
+        var btn2 = document.querySelector('.replay-editor-btn');
+        if (!btn2) return false;
+        btn2.click();
         return true;
     }
 
@@ -2564,7 +2611,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.1';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
