@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.7.1
+// @version      2.7.2
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.7.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.7.2 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2593,9 +2593,9 @@
             container.appendChild(copyButton);
             container.appendChild(progressBtn);
             var discussBtn = document.createElement('button');
-            discussBtn.innerText = '💬 讨论';
-            discussBtn.title = '在讨论页自动发布多条不同角度的简短发言（需先打开一个讨论页面）';
-            discussBtn.style = 'margin-left: 8px; padding: 2px 8px; font-size: 12px; cursor: pointer; border: none; border-radius: 4px; background: #3a3a3a; color: #eee;';
+            discussBtn.innerText = '💬 自动讨论';
+            discussBtn.title = '自动讨论：在当前讨论页发布 3 条不同角度的简短发言（会先读取已有发言、避开重复观点）。需先打开一个"讨论"任务点页面';
+            discussBtn.style = 'margin-left: 8px; padding: 2px 8px; font-size: 12px; cursor: pointer; border: none; border-radius: 4px; background: #3d5a80; color: #fff;';
             discussBtn.onclick = function() {
                 if (typeof autoDiscussFlow === 'function') autoDiscussFlow();
             };
@@ -2611,7 +2611,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.1';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.2';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
