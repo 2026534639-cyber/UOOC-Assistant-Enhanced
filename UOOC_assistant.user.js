@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.7.4
-// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
+// @version      2.8.0
+// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+固定2倍速(更高倍速会被平台判为无效观看)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
 // @include      https://www.uooc.net.cn/home/course/exam/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.7.4 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.8.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -278,7 +278,6 @@
         var startedAt = Date.now();
         var deadline = startedAt + 120000; // 最多等 2 分钟
         var ticks = 0, finished = false, noRowSince = 0;
-        var rate = (typeof getUoocRate === 'function') ? getUoocRate() : 2;
         var rewinds = 0, lastRewindAt = 0;
         var secs = function() { return ((Date.now() - startedAt) / 1000).toFixed(1); };
         // 等到了: 正常往下走
@@ -295,8 +294,7 @@
             finished = true;
             window.__uoocWaitingDone = false;
             console.log(msg);
-            var tip = '这条视频平台没有给打勾（没算你观看）。倍速 ' + rate + 'x。' +
-                      (rate > 2 ? '把倍速调到 2x 重看这条，2x 实测稳定打勾。' : '请手动播放完这条视频再继续。');
+            var tip = '这条视频平台没有给打勾（没算你观看）。请手动把这条视频完整播放一遍再继续。';
             console.log('[UOOC助手] ' + tip + ' 连播已暂停，避免继续刷不计分的任务');
             try { GM_notification({ text: tip, title: 'UOOC 助手：连播已暂停' }); } catch (e) {}
             window.__uoocAutoChainStopped = true;
@@ -322,10 +320,10 @@
             ticks++;
             if (ticks === 2) console.log('[UOOC助手] 视频已播完，等待系统确认打勾后再切下一个...（超过 30 秒还不出勾，多半是倍速过高，平台没记这次观看）');
             if (ticks % 20 === 0) console.log('[UOOC助手] 仍在等系统打勾... 已等 ' + secs() + ' 秒');
-            // 高倍速的"有效停留": 平台对 >2x 的观看时长常常不认, 而单纯停在最后一帧没用
-            // —— 播放位置不再前进, 就产生不了新的观看时长。所以倒回尾部按当前倍速【真实重放】,
-            // 服务端才拿得到新的「位置→结尾」记录; 一旦打勾立刻切下一个。
-            if (rate > 2 && ticks >= 3 && Date.now() - lastRewindAt > 12000) {
+            // "有效停留": 停在最后一帧没用 —— 播放位置不再前进, 服务端就产生不了新的观看时长。
+            // 所以打勾迟到(超过约 8 秒)就倒回尾部【真实重放】一遍, 服务端才拿得到新的
+            // 「位置→结尾」记录; 一旦打勾立刻切下一个。(2x 正常都在几秒内打勾, 不会走到这里)
+            if (ticks >= 6 && Date.now() - lastRewindAt > 12000) {
                 var cv = getCurrentVideo();
                 if (cv && isFinite(cv.duration) && cv.duration > 5) {
                     lastRewindAt = Date.now();
@@ -334,7 +332,7 @@
                         cv.currentTime = cv.duration > 35 ? cv.duration - 30 : 0;
                         var rp = cv.play();
                         if (rp && typeof rp.catch === 'function') rp.catch(function() {});
-                        console.log('[UOOC助手] 倍速 ' + rate + 'x 平台还没打勾 → 倒回尾部 30 秒真实重放（第 ' + rewinds + ' 次），打勾后立刻继续连播');
+                        console.log('[UOOC助手] 平台还没打勾 → 倒回尾部 30 秒真实重放（第 ' + rewinds + ' 次），打勾后立刻继续连播');
                     } catch (e) {}
                 }
             }
@@ -1686,11 +1684,11 @@
         return v;
     }
 
-    // 倍速条目标速度 (2~4x, 滑条选择, localStorage 持久化, 默认 2)
+    // 统一固定 2 倍速。
+    // 4x/3x 实测会被平台判为无效观看：视频播完侧栏不打勾(等于白刷),
+    // 而且高倍速本身就是风控关注点 → 直接去掉倍速条, 只保留"是否自动 2 倍速"这个开关。
     function getUoocRate() {
-        var v = parseFloat(localStorage.getItem('uooc_rate') || '2');
-        if (isNaN(v) || v < 1 || v > 4) v = 2;
-        return v;
+        return 2;
     }
 
     // 把倍速应用到当前视频 (原生属性 + videojs 双通道)
@@ -2434,37 +2432,14 @@
 
         function setCheckboxes(container) {
             var rateCheckbox = getCheckbox('rate', '倍速');
-            // 倍速条: 2~4x 滑条, 拖动即生效并记住选择
-            var rateSlider = document.createElement('input');
-            rateSlider.id = 'rate-slider';
-            rateSlider.type = 'range';
-            rateSlider.min = '2'; rateSlider.max = '4'; rateSlider.step = '0.25';
-            rateSlider.value = localStorage.getItem('uooc_rate') || '2';
-            rateSlider.style = 'margin-left: 8px; width: 90px; vertical-align: middle; cursor: pointer; accent-color: #ffd54a;';
-            rateSlider.title = '倍速滑条：2 ~ 4 倍，拖动选择，立即生效';
+            // 倍速条已移除: 统一 2 倍速(更高倍速会被平台判为无效观看, 且属风控关注点)
             var rateLabel = document.createElement('label');
-            rateLabel.style = 'margin-left: 4px; font-size: 12px; color: #ffd54a; min-width: 36px; display: inline-block;';
-            // 全部任务"打勾"＝平台认可这次观看时长。倍速越高越可能被判无效：
-            // 实测 4x 容易看完不打勾(白刷), 2x 稳定 —— 所以 >2x 就常驻警告
-            var paintRate = function(v) {
-                var risky = v > 2;
-                rateLabel.innerText = v + 'x' + (risky ? ' ⚠' : '');
-                rateLabel.style.color = risky ? '#ff8a65' : '#ffd54a';
-                rateLabel.title = risky
-                    ? ('当前 ' + v + ' 倍速：平台可能不记录本次观看时长（这条视频不会打勾，等于白刷），建议 2 倍速')
-                    : ('当前 ' + v + ' 倍速：平台正常打勾');
-            };
-            paintRate(parseFloat(rateSlider.value));
-            rateSlider.oninput = function() {
-                var v = parseFloat(this.value);
-                if (isNaN(v) || v < 1 || v > 4) v = 2;
-                localStorage.setItem('uooc_rate', String(v));
-                paintRate(v);
-                if (v > 2) console.log('[UOOC助手] 已设为 ' + v + ' 倍速：倍速过高时平台可能不记录观看时长（视频不打勾 = 白刷），2 倍速最稳');
-                if (document.getElementById('rate') && document.getElementById('rate').checked) setVideoRate(v);
-            };
-            rateCheckbox.appendChild(rateSlider);
+            rateLabel.innerText = '2x';
+            rateLabel.title = '已统一固定 2 倍速：4x/3x 实测播完不打勾（等于白刷），且高倍速容易触发风控';
+            rateLabel.style = 'margin-left: 10px; font-size: 12px; color: #ffd54a;';
             rateCheckbox.appendChild(rateLabel);
+            // 清掉旧版本存过的倍速设置, 免得残留值再被别处读到
+            try { localStorage.removeItem('uooc_rate'); } catch (e) {}
             var volumeCheckbox = getCheckbox('volume', '静音');
             var playCheckbox = getCheckbox('play', '播放');
             var continueCheckbox = getCheckbox('continue', '🚀 全自动');
@@ -2723,7 +2698,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.7.4';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.0';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
