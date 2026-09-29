@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.9.8
+// @version      2.10.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.9.8 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.10.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2032,9 +2032,21 @@
     //   ③ 随机抽样：同分之间随机排序，避免每次挑出来的都一样
     // 这一步专门解决"角度雷同"：模型往往一次给你三条一个意思的话，
     // 直接发出去就变成刷屏，这里先把它们合并成一条代表、再按新颖度取前 N。
-    function pickBestReplies(cands, existing, want) {
+    // 按"够不够格发"决定条数 —— 不固定 3 条。
+    // 好写、真实、跟已有发言拉得开的，就多发几条；勉强的一条就好；一条都不够格就不发（跳过这个讨论）。
+    //   · 聚合：字面近似的候选归成一簇，每簇留一条代表（避免"一个意思说三遍"）
+    //   · 评分：跟已有发言越不像分越高；长度 20~90 字略加分，过短扣分
+    //   · 随机抽样：同分之间随机排序，避免每次都挑同一批
+    // 【能力边界】聚合靠字符串相似度，只能合并字面近似的；"换个说法讲同一件事"
+    // 抓不住，那类靠提示词强制多角度解决（见 buildDiscussPrompt），这里不假装能识别语义。
+    var REPLY_MAX = 3;        // 上限（好写的最多发这么多）
+    var NOVEL_OK = 0.45;      // 跟已有发言相似度 ≤ 0.45 才算"有新意，值得发"
+    var NOVEL_LAST = 0.60;    // 退一步：实在没有更好的，只要不过这条线就发 1 条
+
+    function chooseReplies(cands, existing, maxWant) {
+        var cap = maxWant || REPLY_MAX;
         var list = (cands || []).filter(function(t) {
-            return t && String(t).trim().length > 5 && !isDuplicateReply(t, existing);
+            return t && String(t).trim().length >= 8 && !isDuplicateReply(t, existing);
         });
         var clusters = [];
         list.forEach(function(t) {
@@ -2043,21 +2055,31 @@
             }
             clusters.push([t]);
         });
-        // 每簇里挑"跟已有发言最不像"的那条当代表
         var reps = clusters.map(function(c) {
             return c.slice().sort(function(a, b) {
                 return maxSimToExisting(a, existing) - maxSimToExisting(b, existing);
             })[0];
         });
         var scored = reps.map(function(t) {
-            return { t: t, s: scoreReply(t, existing), r: Math.random() };
-        });
-        scored.sort(function(a, b) { return (b.s - a.s) || (a.r - b.r); });
-        var out = scored.slice(0, want).map(function(o) { return o.t; });
-        console.log('[UOOC助手-讨论] 候选评分 ' + JSON.stringify(scored.slice(0, 6).map(function(o) {
-            return { 分: Math.round(o.s * 100) / 100, 文: String(o.t).slice(0, 16) };
-        })));
-        return out;
+            return { t: t, sim: maxSimToExisting(t, existing), s: scoreReply(t, existing), r: Math.random() };
+        }).sort(function(a, b) { return (b.s - a.s) || (a.r - b.r); });
+
+        console.log('[UOOC助手-讨论] 候选评分（共 ' + scored.length + ' 条，按新意排序）: ' +
+            JSON.stringify(scored.slice(0, 6).map(function(o) {
+                return { 跟已有相似: Math.round(o.sim * 100) / 100, 文: String(o.t).slice(0, 14) };
+            })));
+
+        var good = scored.filter(function(o) { return o.sim <= NOVEL_OK; }).slice(0, cap);
+        if (good.length > 0) {
+            return { list: good.map(function(o) { return o.t; }),
+                     why: '够新意的有 ' + good.length + ' 条 → 发 ' + good.length + ' 条' };
+        }
+        if (scored.length > 0 && scored[0].sim <= NOVEL_LAST) {
+            return { list: [scored[0].t],
+                     why: '没有特别新意的，最好那条相似度 ' + (Math.round(scored[0].sim * 100) / 100) +
+                          ' → 就发 1 条' };
+        }
+        return { list: [], why: '没有一条能跟已有发言拉开距离 → 这个讨论跳过不发' };
     }
 
     // 候选不够时：让模型把现有草稿"融合重写"成 want 条互不雷同的新发言
@@ -2219,6 +2241,15 @@
     // 以及"下一条还有几秒"，每秒钟都在动，能看出它确实在干活。
     function countCourseDiscussions() {
         if (window.__uoocSweepTotal) return Promise.resolve(window.__uoocSweepTotal);
+        // 取不到就重试一次：取不到时 total=0，进度条百分比会恒为 0（看起来"一直不动"）
+        return countCourseDiscussionsOnce().then(function(n) {
+            if (n > 0) return n;
+            console.log('[UOOC助手-讨论] 讨论总数没取到（接口失败或返回空），重试一次…');
+            return new Promise(function(res) { setTimeout(res, 1500); }).then(countCourseDiscussionsOnce);
+        });
+    }
+
+    function countCourseDiscussionsOnce() {
         return getCatalogListData().then(function(json) {
             var chapters = json && (json.data || json);
             var n = 0;
@@ -2250,6 +2281,14 @@
                 '<div id="uooc-sweep-count" style="margin-top:5px;color:#ffd54a;font-weight:bold;">已处理 0 个讨论</div>' +
                 '<div id="uooc-sweep-status" style="color:#ddd;">准备中...</div>' +
                 '<div id="uooc-sweep-ago" style="color:#999;font-size:10px;margin-top:3px;">—</div>';
+            if (!document.getElementById('uooc-sweep-style')) {
+                var stEl = document.createElement('style');
+                stEl.id = 'uooc-sweep-style';
+                stEl.textContent =
+                    '@keyframes uoocSweepFlow{0%{margin-left:-35%}100%{margin-left:100%}}' +
+                    '#uooc-sweep-fill.uooc-indet{width:35%!important;animation:uoocSweepFlow 1.1s linear infinite;}';
+                (document.head || document.documentElement).appendChild(stEl);
+            }
             document.body.appendChild(panel);
             document.getElementById('uooc-sweep-close').onclick = function() {
                 panel.style.display = 'none';
@@ -2275,8 +2314,21 @@
         var cnt = document.getElementById('uooc-sweep-count');
         var st = document.getElementById('uooc-sweep-status');
         var ago = document.getElementById('uooc-sweep-ago');
-        if (fill) fill.style.width = (total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0) + '%';
-        if (cnt) cnt.textContent = '已处理 ' + done + ' 个讨论' + (total > 0 ? ' / 共 ' + total + ' 个' : '');
+        // 正在处理的这个讨论内部也按"发到第几条"推进，避免一个讨论要等 30 秒以上才动一次
+        var frac = done + (window.__uoocSweepInDisc || 0);
+        if (fill) {
+            if (total > 0) {
+                fill.classList.remove('uooc-indet');
+                fill.style.width = Math.min(100, Math.round(frac / total * 100)) + '%';
+            } else {
+                // 总数取不到 → 百分比没意义，改成来回流动，至少证明它在干活
+                fill.classList.add('uooc-indet');
+            }
+        }
+        if (cnt) {
+            cnt.textContent = '已处理 ' + done + ' 个讨论' +
+                              (total > 0 ? (' / 共 ' + total + ' 个') : '（总数暂不可用）');
+        }
         if (st) st.textContent = window.__uoocSweepStatus || '';
         if (ago) {
             var parts = [];
@@ -2386,6 +2438,7 @@
         window.__uoocAutoChainStopped = false;
         window.__uoocSweepTotal = 0;
         window.__uoocSweepNextAt = 0;
+        window.__uoocSweepInDisc = 0;
         // 进度面板: 从这一刻起每一步都有可见反馈
         ensureSweepPanel();
         startSweepHeartbeat();
@@ -2473,8 +2526,7 @@
             touchSweepPanel('话题：' + topic.substring(0, 20) + '…（' +
                             (hdr !== null ? '服务端记 ' + hdr + ' 条回复' : '已有 ' + existing.length + ' 条发言') + '）');
         }
-        var WANT = 3;          // 最终要发的条数
-        var CAND = 6;          // 先多要一点候选，再挑（角度雷同的会被聚合掉）
+        var CAND = 6;          // 先多要一点候选，再按质量挑（好写多发、勉强少发、不够格不发）
         var prompt = buildDiscussPrompt(topic, existing, CAND);
         if (window.__uoocDiscussSweep) {
             window.__uoocSweepGenAt = Date.now();
@@ -2489,38 +2541,37 @@
                 console.log('[UOOC助手-讨论] ⚠️ AI 返回内容解析不出条目，原文前 200 字:', String(resp || '').slice(0, 200));
                 if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
             }
-            // 聚合 → 评分 → 抽样：把"一个意思说三遍"的候选合并，再按新颖度取前 3 条
-            var picked = pickBestReplies(parsed, existing, WANT);
+            // 聚合 → 评分 → 按质量定条数
+            var pick = chooseReplies(parsed, existing, REPLY_MAX);
             console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
-                        parsed.length + ' 条 → 聚合评分后选出 ' + picked.length + ' 条');
-            if (picked.length < WANT) {
-                // 不够就"融合重写"一次，仍然不够就拿现有的顶上
-                if (window.__uoocDiscussSweep) touchSweepPanel('候选角度太少，正在融合重写…');
-                var fuse = buildFusePrompt(topic, existing, (picked.length ? picked : parsed).slice(0, 5), WANT);
-                return callLLMText(fuse, 60000, { temperature: 0.95 }).then(function(resp2) {
-                    var again = pickBestReplies(parseNumberedReplies(resp2, CAND), existing, WANT);
-                    console.log('[UOOC助手-讨论] 融合后得到 ' + again.length + ' 条');
-                    return again.length > picked.length ? again : picked;
-                }).catch(function(e) {
-                    console.log('[UOOC助手-讨论] 融合失败(' + e.message + ')，就用已有的 ' + picked.length + ' 条');
-                    return picked;
-                });
-            }
-            return picked;
+                        parsed.length + ' 条 → ' + pick.why);
+            if (pick.list.length > 0) return pick.list;
+            if (parsed.length === 0) return [];
+            // 一条都不够格 → 再试一次"融合重写"，把草稿重新加工成角度分明的新发言
+            if (window.__uoocDiscussSweep) touchSweepPanel('候选都不够新意，正在融合重写…');
+            var fuse = buildFusePrompt(topic, existing, parsed.slice(0, 5), REPLY_MAX);
+            return callLLMText(fuse, 60000, { temperature: 0.95 }).then(function(resp2) {
+                var again = chooseReplies(parseNumberedReplies(resp2, CAND), existing, REPLY_MAX);
+                console.log('[UOOC助手-讨论] 融合后：' + again.why);
+                return again.list;
+            }).catch(function(e) {
+                console.log('[UOOC助手-讨论] 融合失败(' + e.message + ')，这个讨论跳过');
+                return [];
+            });
         }).then(function(fresh) {
             // 到这里生成阶段已结束（成功/融合/失败都要把"生成中"标记清掉）
             if (window.__uoocDiscussSweep) window.__uoocSweepGenAt = 0;
             fresh = fresh || [];
             if (fresh.length === 0) {
-                if (window.__uoocDiscussSweep) touchSweepPanel('生成的发言与已有内容雷同，换角度重写…');
-                console.log('[UOOC助手-讨论] 生成 ' + parsed.length + ' 条，全部被判为与已有 ' + existing.length +
-                            ' 条发言雷同，跳过该讨论继续连播');
+                if (window.__uoocDiscussSweep) touchSweepPanel('没有够新意的发言，跳过这个讨论');
+                console.log('[UOOC助手-讨论] 已有 ' + existing.length + ' 条发言，本次没有一条能拉开距离，跳过该讨论');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
                 window.__uoocLastForwardClick = Date.now();
                 findNextVideo();
                 return;
             }
+            if (window.__uoocDiscussSweep) touchSweepPanel('本讨论准备发 ' + fresh.length + ' 条，开始发布…');
             var i = 0;
             function postNext() {
                 var cb = document.getElementById('continue');
@@ -2528,6 +2579,7 @@
                 if (i >= fresh.length) {
                     if (window.__uoocDiscussSweep) {
                         window.__uoocSweepPosted = (window.__uoocSweepPosted || 0) + 1;
+                        window.__uoocSweepInDisc = 0;   // 这个讨论已完成，进度归整
                         window.__uoocSweepNextAt = 0;
                         saveSweepState();
                     }
@@ -2543,7 +2595,10 @@
                     }, 5000);
                     return;
                 }
-                if (window.__uoocDiscussSweep) touchSweepPanel('正在发布第 ' + (i + 1) + '/' + fresh.length + ' 条…');
+                if (window.__uoocDiscussSweep) {
+                    window.__uoocSweepInDisc = i / Math.max(1, fresh.length);
+                    touchSweepPanel('正在发布第 ' + (i + 1) + '/' + fresh.length + ' 条…');
+                }
                 var ok = postDiscussionReply(fresh[i]);
                 if (ok) {
                     console.log('[UOOC助手-讨论] 已发布第' + (i + 1) + '条:', fresh[i].substring(0, 60));
@@ -2551,6 +2606,7 @@
                     if (window.__uoocDiscussSweep) {
                         confirmReplyPosted(fresh[i], function(confirmed) {
                             if (confirmed) {
+                                window.__uoocSweepInDisc = (i + 1) / Math.max(1, fresh.length);
                                 touchSweepPanel('✅ 第 ' + (i + 1) + '/' + fresh.length + ' 条已确认提交');
                             } else {
                                 touchSweepPanel('⚠️ 第 ' + (i + 1) + '/' + fresh.length + ' 条点了回复，但没看到新发言（可能被拦截或需人机验证）');
@@ -3201,7 +3257,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.9.8';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.10.0';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
