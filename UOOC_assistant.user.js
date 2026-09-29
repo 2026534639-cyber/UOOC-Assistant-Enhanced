@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      1.0.39
-// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计。点击⚙️配置API。
+// @version      1.0.40
+// @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
 // @include      https://www.uooc.net.cn/home/course/exam/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v1.0.39 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v1.0.40 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1479,9 +1479,10 @@
                 console.log('[UOOC助手] 检测到新视频元素，重新绑定事件');
                 // 应用当前设置到新视频
                 if (document.getElementById('rate') && document.getElementById('rate').checked) {
-                    v.playbackRate = 2.0;
+                    var rt = getUoocRate();
+                    v.playbackRate = rt;
                     if (window.videojs && typeof videojs.getPlayer === 'function') {
-                        try { var p = videojs.getPlayer(v); if (p && p.playbackRate) p.playbackRate(2.0); } catch(e) {}
+                        try { var p = videojs.getPlayer(v); if (p && p.playbackRate) p.playbackRate(rt); } catch(e) {}
                     }
                 }
                 if (document.getElementById('volume') && document.getElementById('volume').checked) {
@@ -1496,6 +1497,26 @@
             }
         }
         return v;
+    }
+
+    // 倍速条目标速度 (2~4x, 滑条选择, localStorage 持久化, 默认 2)
+    function getUoocRate() {
+        var v = parseFloat(localStorage.getItem('uooc_rate') || '2');
+        if (isNaN(v) || v < 1 || v > 4) v = 2;
+        return v;
+    }
+
+    // 把倍速应用到当前视频 (原生属性 + videojs 双通道)
+    function setVideoRate(v) {
+        var video = getCurrentVideo();
+        if (!video) return;
+        video.playbackRate = v;
+        if (window.videojs && typeof videojs.getPlayer === 'function') {
+            try {
+                var p = videojs.getPlayer(video);
+                if (p && typeof p.playbackRate === 'function') p.playbackRate(v);
+            } catch (e) {}
+        }
     }
 
     // 绑定视频事件 - 增强兼容性 (SPA导航时重新绑定)
@@ -1631,16 +1652,17 @@
         var play = document.getElementById('play');
         var rate = document.getElementById('rate');
 
-        // 应用2倍速 (通过videojs API + 直接设置双重保障)
+        // 应用倍速 (跟随滑条选择, 通过videojs API + 直接设置双重保障)
         if (rate && rate.checked) {
-            if (video.playbackRate !== 2.0) {
-                video.playbackRate = 2.0;
+            var rt = getUoocRate();
+            if (video.playbackRate !== rt) {
+                video.playbackRate = rt;
             }
             if (window.videojs && typeof videojs.getPlayer === 'function') {
                 try {
                     var player = videojs.getPlayer(video);
                     if (player && typeof player.playbackRate === 'function') {
-                        player.playbackRate(2.0);
+                        player.playbackRate(rt);
                     }
                 } catch (e) {
                     console.log('[UOOC助手] videojs API设置倍速失败:', e.message);
@@ -1817,6 +1839,26 @@
 
         function setCheckboxes(container) {
             var rateCheckbox = getCheckbox('rate', '倍速');
+            // 倍速条: 2~4x 滑条, 拖动即生效并记住选择
+            var rateSlider = document.createElement('input');
+            rateSlider.id = 'rate-slider';
+            rateSlider.type = 'range';
+            rateSlider.min = '2'; rateSlider.max = '4'; rateSlider.step = '0.25';
+            rateSlider.value = localStorage.getItem('uooc_rate') || '2';
+            rateSlider.style = 'margin-left: 8px; width: 90px; vertical-align: middle; cursor: pointer; accent-color: #ffd54a;';
+            rateSlider.title = '倍速滑条：2 ~ 4 倍，拖动选择，立即生效';
+            var rateLabel = document.createElement('label');
+            rateLabel.style = 'margin-left: 4px; font-size: 12px; color: #ffd54a; min-width: 36px; display: inline-block;';
+            rateLabel.innerText = parseFloat(rateSlider.value) + 'x';
+            rateSlider.oninput = function() {
+                var v = parseFloat(this.value);
+                if (isNaN(v) || v < 1 || v > 4) v = 2;
+                localStorage.setItem('uooc_rate', String(v));
+                rateLabel.innerText = v + 'x';
+                if (document.getElementById('rate') && document.getElementById('rate').checked) setVideoRate(v);
+            };
+            rateCheckbox.appendChild(rateSlider);
+            rateCheckbox.appendChild(rateLabel);
             var volumeCheckbox = getCheckbox('volume', '静音');
             var playCheckbox = getCheckbox('play', '播放');
             var copyButton = getCopyButton();
@@ -1987,17 +2029,9 @@
                     var v = getCurrentVideo();
                     if (v) {
                         if (event.target.checked) {
-                            v.playbackRate = 2;
-                            if (window.videojs && typeof videojs.getPlayer === 'function') {
-                                try {
-                                    var player = videojs.getPlayer(v);
-                                    if (player && typeof player.playbackRate === 'function') {
-                                        player.playbackRate(2);
-                                    }
-                                } catch (e) {}
-                            }
+                            setVideoRate(getUoocRate());
                         }
-                        else v.playbackRate = 1;
+                        else setVideoRate(1);
                     }
                 };
             }
@@ -2049,7 +2083,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v1.0.39';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v1.0.40';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2403,9 +2437,8 @@
         waitHead();
     }
 
-    // ==================== 2倍速自动应用模块 (合并自uooc-2x) ====================
-    // 确保所有视频元素自动应用2倍速播放
-    const RATE = 2;
+    // ==================== 倍速自动应用模块 (合并自uooc-2x) ====================
+    // 确保所有视频元素自动应用滑条所选倍速 (2~4x); 倍速复选框未勾选时不强制
     const VIDEO_SELECTOR_2X = "video#player_html5_api.vjs-tech, video.vjs-tech";
     const MEDIA_EVENTS_2X = ["loadedmetadata", "loadeddata", "canplay", "loadstart", "play", "ratechange"];
     const boundVideos = new WeakSet();
@@ -2413,15 +2446,18 @@
     const getVideos = () => Array.from(document.querySelectorAll(VIDEO_SELECTOR_2X));
 
     const applyRate = (video) => {
-        if (video.playbackRate === RATE) return;
-        video.playbackRate = RATE;
+        var rateBox = document.getElementById('rate');
+        if (!rateBox || !rateBox.checked) return;
+        var target = getUoocRate();
+        if (video.playbackRate === target) return;
+        video.playbackRate = target;
 
         const videojsApi = window.videojs;
         if (!videojsApi || typeof videojsApi.getPlayer !== "function") return;
 
         const player = videojsApi.getPlayer(video.id);
         if (player && typeof player.playbackRate === "function") {
-            player.playbackRate(RATE);
+            player.playbackRate(target);
         }
     };
 
