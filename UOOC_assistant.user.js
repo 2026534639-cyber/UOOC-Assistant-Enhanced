@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.8.4
+// @version      2.8.5
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.8.4 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.8.5 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -342,6 +342,37 @@
             }
             setTimeout(poll, 1500);
         })();
+    }
+
+    // 内容区是不是"网关错误页"(优课偶发 502/504)。
+    // 连播点过去之后如果任务页 iframe 变成了错误页, 就既没有视频也没有题目,
+    // 而 __uoocLastForwardClick 的 15 秒防连点会让它不再重试 → 连播静默卡死。
+    // 这里提供检测, 交给 3 秒轮询做有限次重试。
+    function looksLikeGatewayError() {
+        function bad(doc) {
+            try {
+                if (!doc) return false;
+                var txt = (doc.title || '') + ' ' +
+                          ((doc.body && (doc.body.innerText || doc.body.textContent)) || '').slice(0, 400);
+                return /502|504|Bad Gateway|Gateway Time-?out/i.test(txt);
+            } catch (e) { return false; }
+        }
+        if (bad(document)) return true;
+        var frames = document.querySelectorAll('iframe');
+        for (var i = 0; i < frames.length; i++) {
+            try { if (bad(frames[i].contentDocument)) return true; } catch (e) {}
+        }
+        return false;
+    }
+
+    // 当前页是不是"有实质内容"的学习页 (视频 / 测验 / 讨论)
+    function onContentPage() {
+        if (typeof getCurrentVideo === 'function' && getCurrentVideo()) return true;
+        if (typeof isQuizPageVisible === 'function' && isQuizPageVisible()) return true;
+        if (typeof findExamIframeDoc === 'function' && findExamIframeDoc()) return true;
+        // 讨论页特征
+        if (document.querySelector('.thesis-content, .Reply-item, .replay-editor')) return true;
+        return false;
     }
 
     // 统计侧栏任务行 (goSource): complete 打勾 = 已看/已完成
@@ -2328,6 +2359,27 @@
                         waitCurrentTaskDone(function() { findNextVideo(); });
                     }
                 } catch(e) {}
+                // 502 保险: 连播点过去但目标页没加载出来(网关错误页) → 有限次重试点击,
+                // 否则 __uoocLastForwardClick 的 15 秒防连点会让连播永久卡死在这里
+                try {
+                    var cont2 = document.getElementById('continue');
+                    if (cont2 && cont2.checked && !onContentPage() && looksLikeGatewayError() &&
+                        window.__uoocLastForwardClick && Date.now() - window.__uoocLastForwardClick > 20000) {
+                        window.__uoocForwardRetry = (window.__uoocForwardRetry || 0) + 1;
+                        if (window.__uoocForwardRetry <= 3) {
+                            console.log('[UOOC助手] ⚠️ 目标页面没加载出来（站点 502/网关错误），第 ' +
+                                        window.__uoocForwardRetry + ' 次重试...');
+                            window.__uoocLastForwardClick = 0; // 放行重试
+                            findNextVideo();
+                        } else if (window.__uoocForwardRetry === 4) {
+                            window.__uoocForwardRetry = 5; // 只提示一次
+                            console.log('[UOOC助手] ⚠️ 连续 4 次都没加载出来（优课 502），已停止重试。' +
+                                        '这是站点的临时故障，等几分钟按 Ctrl+F5 刷新页面再继续即可');
+                        }
+                    } else if (window.__uoocForwardRetry && onContentPage()) {
+                        window.__uoocForwardRetry = 0; // 进入正常内容页 → 清零
+                    }
+                } catch (e) {}
                 // 界面自愈: Angular 重新渲染 header 时会把注入的界面节点一起冲掉 ——
                 // 表现就是"功能还在(静音/倍速照常生效)，但界面不见了，必须刷新页面"。
                 // 每 3 秒查一次, 发现界面不在了就重新放置 (placeComponents 已做成可重入)。
@@ -2775,7 +2827,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.4';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.8.5';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
