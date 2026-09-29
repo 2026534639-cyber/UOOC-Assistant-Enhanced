@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.1.1
+// @version      2.1.2
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速2~4x任选。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.1.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.1.2 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2108,7 +2108,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.1.1';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.1.2';
             div.style = 'color: #888; font-size: 10px; margin: 5px 20px; padding: 2px 5px;';
             container.appendChild(div);
         }
@@ -2677,10 +2677,19 @@
                         document.querySelector('video')) {
                         ready();
                     } else {
-                        // 新页面可能需要点击章节/视频项才能加载播放器
-                        var videoItem = document.querySelector('.icon-video, .video-item, [class*="video"], .basic.active, .chapter-item, .section-item, .lesson-item');
+                        // 新页面可能需要点击视频任务行才加载播放器。
+                        // 只点"未看完的视频任务行"——绝不点知识点标题行:
+                        // 点标题会导航到知识点落地页, 播放器永远出不来
+                        var videoItem = null;
+                        var taskRows = document.querySelectorAll('.basic[ng-click*="goSource"]');
+                        for (var tI = 0; tI < taskRows.length; tI++) {
+                            if (taskRows[tI].querySelector('[class*="icon-video"], [class*="video"]') && !taskRows[tI].classList.contains('complete')) {
+                                videoItem = taskRows[tI];
+                                break;
+                            }
+                        }
                         if (videoItem) {
-                            console.log('[UOOC助手] 点击视频/章节项:', videoItem.className);
+                            console.log('[UOOC助手] 点击未看完的视频任务行:', (videoItem.innerText || '').trim().substring(0, 20));
                             videoItem.click();
                             // 延迟检查，SPA异步渲染
                             var videoReadyAttempts = 0;
