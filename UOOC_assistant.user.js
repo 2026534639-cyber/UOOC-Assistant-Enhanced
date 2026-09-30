@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC 助手
 // @namespace    http://tampermonkey.net/
-// @version      3.1.0
+// @version      3.2.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       理不尽
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v3.1.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v3.2.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -3151,7 +3151,7 @@
             var autoAnswerLabel = document.createElement('label');
             autoAnswerLabel.htmlFor = 'auto-llm-answer';
             autoAnswerLabel.innerText = '自动答题';
-            autoAnswerLabel.style = 'margin-left: 5px; font-size: 12px; color: #ffc107;';
+            autoAnswerLabel.style = 'margin-left: 5px; font-size: 12px; color: var(--uoc-warn);';
             autoAnswerLabel.title = '开启后，检测到题目自动调用LLM答题，无需手动点击"开始答题"';
 
             llmContainer.appendChild(autoAnswerCheckbox);
@@ -3169,7 +3169,7 @@
             };
             var autoSubmitLabel = document.createElement('label');
             autoSubmitLabel.innerText = '自动提交';
-            autoSubmitLabel.style = 'margin-left: 5px; font-size: 12px; color: #17a2b8;';
+            autoSubmitLabel.style = 'margin-left: 5px; font-size: 12px; color: var(--uoc-info);';
             autoSubmitLabel.title = 'LLM 答题完成后自动点击"提交试卷"并确认（提交后无法修改答案，慎关慎开）';
             llmContainer.appendChild(autoSubmitCheckbox);
             llmContainer.appendChild(autoSubmitLabel);
@@ -3274,7 +3274,7 @@
         function setAttribution(container) {
             var div = document.createElement('div');
             div.className = 'uoc-brand';
-            div.innerHTML = 'UOOC助手 by 理不尽 | v3.1.0';
+            div.innerHTML = 'UOOC助手 by 理不尽 | v3.2.0';
             container.appendChild(div);
         }
 
@@ -3302,7 +3302,6 @@
             'left: 0',
             'right: 0',
             'z-index: 99999', // 高于优课自身 UI, 但不至于压住阿里云智能验证那一层
-            'background: rgba(24, 24, 27, 0.96)',
             'display: flex',
             'flex-direction: row',
             'align-items: center',
@@ -3313,40 +3312,73 @@
             'font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif'
         ].join(';') + ';';
 
-        // 分区/按钮皮肤（挂 <style> 一次即可；重建 UI 不重复注入）
+        // 主题皮肤（挂 <style> 一次即可；重建 UI 不重复注入）。
+        // 颜色全部走 CSS 变量：默认夜间，bar 加 .uoc-light 即切日间。
         if (!document.getElementById('uooc-bar-skin')) {
             var skin = document.createElement('style');
             skin.id = 'uooc-bar-skin';
             skin.textContent = [
+                '#uooc-helper-bar{',
+                '  --uoc-bar-bg:rgba(24,24,27,0.96);',
+                '  --uoc-group-bg:rgba(255,255,255,0.07);',
+                '  --uoc-text:#d8d8dc;',
+                '  --uoc-text-hover:#ffffff;',
+                '  --uoc-btn-bg:#48484c;',
+                '  --uoc-btn-bg-hover:#5c5c62;',
+                '  --uoc-btn-fg:#eeeeee;',
+                '  --uoc-handle-bg:rgba(255,255,255,0.1);',
+                '  --uoc-handle-bg-hover:rgba(255,255,255,0.2);',
+                '  --uoc-brand:#6e6e73;',
+                '  --uoc-warn:#ffc107;',
+                '  --uoc-info:#4cc3d7;',
+                '  background:var(--uoc-bar-bg);color:var(--uoc-text);}',
+                '#uooc-helper-bar.uoc-light{',
+                '  --uoc-bar-bg:rgba(255,255,255,0.97);',
+                '  --uoc-group-bg:rgba(0,0,0,0.05);',
+                '  --uoc-text:#3a3a3c;',
+                '  --uoc-text-hover:#000000;',
+                '  --uoc-btn-bg:#e9e9eb;',
+                '  --uoc-btn-bg-hover:#dcdce0;',
+                '  --uoc-btn-fg:#1c1c1e;',
+                '  --uoc-handle-bg:rgba(0,0,0,0.08);',
+                '  --uoc-handle-bg-hover:rgba(0,0,0,0.16);',
+                '  --uoc-brand:#98989d;',
+                '  --uoc-warn:#b45309;',
+                '  --uoc-info:#0e7c8c;}',
                 // —— 分组胶囊 ——
                 '.uoc-group{display:inline-flex;align-items:center;padding:3px 10px;',
-                '  background:rgba(255,255,255,0.07);border-radius:9px;}',
+                '  background:var(--uoc-group-bg);border-radius:9px;}',
                 '.uoc-group-label{font-size:10px;color:#8e8e93;margin-right:8px;',
                 '  letter-spacing:2px;user-select:none;}',
                 // —— 开关 ——
                 '.uoc-toggle{display:inline-flex;align-items:center;font-size:12px;',
-                '  color:#d8d8dc;margin-left:10px;cursor:pointer;white-space:nowrap;}',
+                '  color:var(--uoc-text);margin-left:10px;cursor:pointer;white-space:nowrap;}',
                 '.uoc-toggle:first-child{margin-left:2px;}',
                 '.uoc-toggle input{width:12px;height:12px;margin:0 4px 0 0;accent-color:#930A41;cursor:pointer;}',
-                '.uoc-toggle:hover{color:#fff;}',
-                '.uoc-toggle-text{font-size:12px;color:#d8d8dc;margin:0 4px;}',
+                '.uoc-toggle:hover{color:var(--uoc-text-hover);}',
+                '.uoc-toggle-text{font-size:12px;color:var(--uoc-text);margin:0 4px;}',
                 '.uoc-check{width:12px;height:12px;margin:0 4px;accent-color:#930A41;cursor:pointer;}',
                 // —— 按钮 ——
                 '.uoc-btn{margin-left:6px;padding:3px 10px;font-size:12px;border:none;',
-                '  border-radius:6px;background:#48484c;color:#eee;cursor:pointer;',
+                '  border-radius:6px;background:var(--uoc-btn-bg);color:var(--uoc-btn-fg);cursor:pointer;',
                 '  transition:background .15s,transform .08s;white-space:nowrap;}',
-                '.uoc-btn:hover{background:#5c5c62;}',
+                '.uoc-btn:hover{background:var(--uoc-btn-bg-hover);}',
                 '.uoc-btn:active{transform:scale(0.96);}',
-                '.uoc-btn-blue{background:#3d5a80;}',
+                '.uoc-btn-blue{background:#3d5a80;color:#fff;}',
                 '.uoc-btn-blue:hover{background:#4d709f;}',
                 // —— 选择器 / 图标 ——
                 '.uoc-select{margin-left:8px;font-size:12px;padding:2px 4px;border:none;',
-                '  border-radius:6px;background:#48484c;color:#eee;cursor:pointer;}',
+                '  border-radius:6px;background:var(--uoc-btn-bg);color:var(--uoc-btn-fg);cursor:pointer;}',
                 '.uoc-gear{font-size:15px;cursor:pointer;margin:0 6px 0 0;',
                 '  transition:transform .3s;display:inline-block;}',
                 '.uoc-gear:hover{transform:rotate(90deg);}',
+                // —— 小圆钮（主题切换 / 折叠） ——
+                '.uoc-mini{width:22px;height:18px;line-height:18px;text-align:center;',
+                '  font-size:11px;color:var(--uoc-text);background:var(--uoc-handle-bg);',
+                '  border-radius:6px;cursor:pointer;user-select:none;transition:background .15s;}',
+                '.uoc-mini:hover{background:var(--uoc-handle-bg-hover);}',
                 // —— 署名 ——
-                '.uoc-brand{color:#6e6e73;font-size:10px;margin-left:auto;',
+                '.uoc-brand{color:var(--uoc-brand);font-size:10px;margin-left:auto;',
                 '  padding:0 4px;white-space:nowrap;}'
             ].join('');
             document.head.appendChild(skin);
@@ -3362,16 +3394,28 @@
         // 折叠把手：作为控制条内的最后一个元素（margin-left:auto 推到行尾）。
         // 收起时把控制条本身缩成右上角一个小胶囊 —— 把手就长在条里，既不用为它预留空白，
         // 也不需要再去动网站自己的头部（原来那套包装网站头部内容的做法正是界面易丢的根源）。
+        // 日间 / 夜间模式切换（记住选择；夜间为默认）
+        var themeBtn = document.createElement('div');
+        themeBtn.id = 'uoc-theme-toggle';
+        themeBtn.className = 'uoc-mini';
+        themeBtn.title = '切换 日间 / 夜间 模式';
+        var applyBarTheme = function(mode) {
+            var light = mode === 'light';
+            bar.classList.toggle('uoc-light', light);
+            themeBtn.textContent = light ? '🌙' : '☀️';
+            try { localStorage.setItem('uooc_bar_theme', mode); } catch (e) {}
+        };
+        var savedTheme = 'dark';
+        try { if (localStorage.getItem('uooc_bar_theme') === 'light') savedTheme = 'light'; } catch (e) {}
+        applyBarTheme(savedTheme);
+        themeBtn.onclick = function() {
+            applyBarTheme(bar.classList.contains('uoc-light') ? 'dark' : 'light');
+        };
+        bar.appendChild(themeBtn);
+
         var toggleBtn = document.createElement('div');
         toggleBtn.id = 'control-panel-toggle';
-        toggleBtn.style.cssText = [
-            'width: 22px', 'height: 18px', 'line-height: 18px',
-            'text-align: center', 'font-size: 11px', 'color: #ccc',
-            'background: rgba(255, 255, 255, 0.1)', 'border-radius: 6px',
-            'cursor: pointer', 'user-select: none', 'transition: background .15s'
-        ].join(';') + ';';
-        toggleBtn.onmouseenter = function() { toggleBtn.style.background = 'rgba(255,255,255,0.2)'; };
-        toggleBtn.onmouseleave = function() { toggleBtn.style.background = 'rgba(255, 255, 255, 0.1)'; };
+        toggleBtn.className = 'uoc-mini';
         toggleBtn.title = '收起 / 展开 UOOC 助手控制条';
         var setCollapsed = function(collapsed) {
             checkboxContainer.style.display = collapsed ? 'none' : 'flex';
