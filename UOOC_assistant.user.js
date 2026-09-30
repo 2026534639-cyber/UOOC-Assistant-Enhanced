@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.14.0
+// @version      2.15.1
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.14.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.15.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2284,6 +2284,7 @@
     function touchSweepPanel(statusText) {
         if (statusText) window.__uoocSweepStatus = statusText;
         window.__uoocSweepTouchedAt = Date.now();
+        window.__uoocSweepRecover = 0;   // 有动作 = 没停滞
         updateSweepPanel();
     }
 
@@ -2329,10 +2330,39 @@
         }
     }
 
-    // 1 秒心跳：负责刷新"还有几秒 / 多久没动"，让面板一直在动
+    // 1 秒心跳：负责刷新"还有几秒 / 多久没动"，让面板一直在动；
+    // 同时做【停滞自愈】—— 清扫链上任何一环断了（该走的下一步没人调度），
+    // 表现就是面板数字永远不动。超过闲置上限就自动重新推进，最多 3 次，
+    // 再不行才停下来并说明原因。
     function startSweepHeartbeat() {
         if (window.__uoocSweepTimer) return;
-        window.__uoocSweepTimer = setInterval(updateSweepPanel, 1000);
+        window.__uoocSweepTimer = setInterval(function() {
+            // 停滞自愈
+            if (window.__uoocDiscussSweep) {
+                var ref = window.__uoocSweepGenAt || window.__uoocSweepTouchedAt || 0;
+                var limit = window.__uoocSweepGenAt ? 90000 : 45000; // 等 AI 期间上限放宽到 90 秒
+                var idle = ref ? (Date.now() - ref) : 0;
+                if (idle > limit) {
+                    window.__uoocSweepRecover = (window.__uoocSweepRecover || 0) + 1;
+                    if (window.__uoocSweepRecover <= 3) {
+                        console.log('[UOOC助手-讨论] ⚠️ 清扫已 ' + Math.round(idle / 1000) +
+                                    ' 秒没有任何动作（链上某一环没接上），第 ' +
+                                    window.__uoocSweepRecover + ' 次自动恢复推进…');
+                        window.__uoocSweepTouchedAt = Date.now();
+                        window.__uoocSweepGenAt = 0;
+                        window.__uoocNavPending = false;
+                        window.__uoocAnswerBusy = false;
+                        touchSweepPanel('检测到清扫停滞，正在自动恢复…');
+                        findNextVideo();
+                    } else if (window.__uoocSweepRecover === 4) {
+                        window.__uoocSweepRecover = 5; // 只提示一次
+                        stopDiscussSweep('清扫多次停滞，自动恢复也没能继续');
+                        return;
+                    }
+                }
+            }
+            updateSweepPanel();
+        }, 1000);
     }
 
     // ==================== 讨论清扫（只刷讨论） ====================
@@ -2500,6 +2530,18 @@
     // ==================== 连播遇讨论：全自动发布流程 ====================
     // 连播勾选中时: 进入讨论页 → 识别话题 → AI 生成 3 条学生口吻短发言 → 逐条发布 → 继续连播
     function autoDiscussContinueFlow(attempts) {
+        try {
+            return autoDiscussContinueFlowInner(attempts);
+        } catch (e) {
+            console.error('[UOOC助手-讨论] ⚠️ 讨论流程内部出错（已自动继续下一个）:', e && (e.stack || e.message));
+            window.__uoocSilentAnswer = false;
+            window.__uoocNavPending = false;
+            touchSweepPanel('⚠️ 讨论流程内部出错，已自动跳到下一个');
+            setTimeout(function() { findNextVideo(); }, 3000);
+        }
+    }
+
+    function autoDiscussContinueFlowInner(attempts) {
         var continueBox = document.getElementById('continue');
         // 讨论清扫模式下不要求勾「全自动」——按钮本身就是启动开关
         if ((!continueBox || !continueBox.checked) && !window.__uoocDiscussSweep) {
@@ -3312,7 +3354,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.14.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.15.1';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
