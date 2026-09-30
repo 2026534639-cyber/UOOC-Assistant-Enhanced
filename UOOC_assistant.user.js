@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.15.2
+// @version      2.15.3
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.15.2 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.15.3 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2045,18 +2045,16 @@
     var REPLY_MAX = 3;        // 每个讨论最多发几条（好写的最多发这么多）
 
     // 从候选里挑出要发的条数（1~3，按随机抽样保持多样性）。
-    // 【不再有"够不够格"】跟已有发言像不像一概不管 —— 用户明确要求：学术题尽量答。
-    // 唯一拦的是【跟某条已有发言一字不差】（原样复读别人，发了也没意义）。
+    // 【2026-09-30 定稿口径：跟已有发言像不像、雷不雷同一概不管】——
+    // 脚本只负责"帮人讨论、帮人提交"，内容贴题就行（用户原话：内容只要符合就行了）。
+    // 保留的只有候选内部的聚合（AI 自己一个意思说了三遍时并成一条，避免刷屏）。
     function chooseReplies(cands, existing, maxWant) {
         var cap = maxWant || REPLY_MAX;
         var norm = function(t) { return String(t || '').replace(/\s/g, ''); };
-        var frags = existingFragments(existing);
-        var fragsNorm = frags.map(norm);
         var clusters = [];
         (cands || []).forEach(function(t) {
             var n = norm(t);
-            if (!n || n.length < 8) return;              // 太短不算一条发言
-            if (fragsNorm.indexOf(n) >= 0) return;        // 与某条已有发言一字不差
+            if (!n) return;
             for (var i = 0; i < clusters.length; i++) {
                 if (replySimilarity(t, clusters[i][0]) >= 0.45) { clusters[i].push(t); return; }
             }
@@ -2631,35 +2629,26 @@
                 if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
             }
             // 聚合（字面近似的归成一簇）→ 随机抽样 → 最多 REPLY_MAX 条；
-            // 不设"新意"门槛、不做近似判重 —— 唯一拦的是【跟某条已有发言一字不差】。
+            // 不设"新意"门槛、不做任何判重 —— 内容贴题就发（跟别人像不像一概不管）。
             var pick = chooseReplies(parsed, existing, REPLY_MAX);
             if (questionTopic) console.log('[UOOC助手-讨论] 这是提问型/学术性讨论 → 不设新意门槛、不做近似判重（只有逐字照抄才拦）');
             console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
                         parsed.length + ' 条 → 本次发 ' + pick.length + ' 条');
             if (pick.length > 0) return pick;
             if (parsed.length === 0) return [];
-            // 一条都发不了 → 再试一次"融合重写"，把草稿重新加工成角度分明的新发言
-            if (window.__uoocDiscussSweep) touchSweepPanel('候选都与已有发言重合，正在融合重写…');
-            var fuse = buildFusePrompt(topic, existing, parsed.slice(0, 5), REPLY_MAX);
-            return callLLMText(fuse, 60000, { temperature: 0.95 }).then(function(resp2) {
-                var again = chooseReplies(parseNumberedReplies(resp2, CAND), existing, REPLY_MAX);
-                console.log('[UOOC助手-讨论] 融合后：本次发 ' + again.length + ' 条');
-                return again;
-            }).catch(function(e) {
-                console.log('[UOOC助手-讨论] 融合失败(' + e.message + ')，这个讨论跳过');
-                return [];
-            });
+            // 走到这只有一种情形：解析出的条目全是空串。不做任何内容过滤，直接原样发
+            return parsed.slice(0, REPLY_MAX);
         }).then(function(fresh) {
             // 到这里生成阶段已结束（成功/融合/失败都要把"生成中"标记清掉）
             if (window.__uoocDiscussSweep) window.__uoocSweepGenAt = 0;
             fresh = fresh || [];
             if (fresh.length === 0) {
                 if (window.__uoocDiscussSweep) {
-                    touchSweepPanel('候选都没能发（解析不出或与已有发言一字不差），跳过这个讨论');
+                    touchSweepPanel('⚠️ AI 返回的内容解析不出条目，跳过这个讨论（不会因为雷同跳过）');
                 }
                 console.log('[UOOC助手-讨论] 清扫推进 → 跳过该讨论，去找下一个（已处理 ' + (window.__uoocSweepPosted || 0) + ' 个）');
-                console.log('[UOOC助手-讨论] 跳过原因：解析出 ' + parsed0Len + ' 条候选，逐字判重后 0 条可发。' +
-                            '若控制台上方有"AI 返回内容解析不出条目"的提示，那是格式问题不是判重问题');
+                console.log('[UOOC助手-讨论] 跳过原因：解析出 ' + parsed0Len + ' 条候选、0 条可发。' +
+                            '若控制台上方有"AI 返回内容解析不出条目"的提示，那是格式问题；雷同/照抄现在一律照发');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
                 window.__uoocLastForwardClick = Date.now();
@@ -3363,7 +3352,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.15.2';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.15.3';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
