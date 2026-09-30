@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC 助手
 // @namespace    http://tampermonkey.net/
-// @version      3.2.0
+// @version      3.2.1
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       理不尽
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v3.2.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v3.2.1 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1603,12 +1603,11 @@
         return v;
     }
 
-    // 可选倍速档位 —— 只放【实测安全】的档位。
-    // 实测: 2x ✓、2.25x ✓；2.5x 会被风控 / 判为无效观看；3x、4x 更不行。
-    // 所以不提供滑条(能拖到风控档), 只给一个两档选择器。
-    // 想再加档位: 自己实测能打勾后, 把数值加进这个数组即可。
-    var SAFE_RATES = [2, 2.25];
-    var DEFAULT_RATE = 2.25;
+    // 倍速固定 2x —— 唯一实测稳定且不被风控的档位。
+    // 实测: 2x ✓；2.25x 虽然也打勾但没有任何意义；2.5x 会被风控 / 判为无效观看；3x、4x 更不行。
+    // 想再加档位: 自己实测能打勾后, 把数值加进这个数组并恢复选择器。
+    var SAFE_RATES = [2];
+    var DEFAULT_RATE = 2;
     function getUoocRate() {
         var v = parseFloat(localStorage.getItem('uooc_rate') || '');
         // 读出来的值不在白名单里(旧版本可能存过 3/4) → 回落到默认档
@@ -2963,32 +2962,12 @@
 
         function buildControlPanel(container) {
 
-            var rateCheckbox = buildToggle('rate', '倍速');
-            // 倍速选择器: 只列实测安全的两档(2x / 2.25x)。
-            // 不做滑条了 —— 滑条能拖到 2.5x/3x/4x, 那些档会被平台判为无效观看并触发风控。
-            var rateSelect = document.createElement('select');
-            rateSelect.id = 'rate-select';
-            rateSelect.className = 'uoc-select';
-            rateSelect.title = '倍数档位：实测 2x / 2.25x 平台正常打勾；2.5x 及以上会被判为无效观看（视频不打勾＝白刷）且触发风控，故不提供';
-            SAFE_RATES.forEach(function(r) {
-                var opt = document.createElement('option');
-                opt.value = String(r);
-                opt.textContent = r + 'x';
-                if (r === getUoocRate()) opt.selected = true;
-                rateSelect.appendChild(opt);
-            });
-            rateSelect.onchange = function() {
-                var v = parseFloat(this.value);
-                if (SAFE_RATES.indexOf(v) < 0) v = DEFAULT_RATE;
-                localStorage.setItem('uooc_rate', String(v));
-                console.log('[UOOC助手] 倍速已切换为 ' + v + 'x');
-                if (document.getElementById('rate') && document.getElementById('rate').checked) setVideoRate(v);
-            };
-            rateCheckbox.appendChild(rateSelect);
+            var rateCheckbox = buildToggle('rate', '2倍速');
+            rateCheckbox.title = '固定 2 倍速：实测唯一稳定且平台正常打勾的档位（2.5x 及以上会被判无效观看并触发风控）';
             var volumeCheckbox = buildToggle('volume', '静音');
             var playCheckbox = buildToggle('play', '播放');
             var continueCheckbox = buildToggle('continue', '🚀 全自动');
-            continueCheckbox.title = '全自动：看完自动播下一个；测验自动AI作答并提交；讨论自动发布；文本/附件跳过';
+            continueCheckbox.title = '全自动：看完自动播下一个；测验自动AI作答并提交；讨论/文本/附件跳过';
             continueCheckbox.onchange = function() {
                 if (this.checked) {
                     window.__uoocAutoChainStopped = false;
@@ -3274,7 +3253,7 @@
         function setAttribution(container) {
             var div = document.createElement('div');
             div.className = 'uoc-brand';
-            div.innerHTML = 'UOOC助手 by 理不尽 | v3.2.0';
+            div.innerHTML = 'UOOC助手 by 理不尽 | v3.2.1';
             container.appendChild(div);
         }
 
@@ -3366,9 +3345,7 @@
                 '.uoc-btn:active{transform:scale(0.96);}',
                 '.uoc-btn-blue{background:#3d5a80;color:#fff;}',
                 '.uoc-btn-blue:hover{background:#4d709f;}',
-                // —— 选择器 / 图标 ——
-                '.uoc-select{margin-left:8px;font-size:12px;padding:2px 4px;border:none;',
-                '  border-radius:6px;background:var(--uoc-btn-bg);color:var(--uoc-btn-fg);cursor:pointer;}',
+                // —— 图标 ——
                 '.uoc-gear{font-size:15px;cursor:pointer;margin:0 6px 0 0;',
                 '  transition:transform .3s;display:inline-block;}',
                 '.uoc-gear:hover{transform:rotate(90deg);}',
