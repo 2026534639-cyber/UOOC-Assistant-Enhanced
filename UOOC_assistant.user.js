@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC 助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.1.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       理不尽
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v3.0.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v3.1.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2902,16 +2902,17 @@
             document.body.removeChild(box);
         }
 
-        // 一行开关 = 复选框 + 文字。ID 供全脚本定位：rate / volume / play / continue
+        // 一行开关 = 复选框 + 文字（label 包住 input，点文字即可切换）。
+        // ID 供全脚本定位：rate / volume / play / continue
         function buildToggle(id, text) {
-            var line = buildEl('span', 'color: #ccc; padding-left: 10px;');
-            var box = buildEl('input', 'margin-left: 15px; width: 12px; height: 12px;', line);
+            var line = buildEl('label', null);
+            line.className = 'uoc-toggle';
+            var box = buildEl('input', null, line);
             box.type = 'checkbox';
             box.id = id;
             box.name = id;
             box.checked = true;
-            var tip = buildEl('label', 'margin-left: 13px; font-size: 12px;', line);
-            tip.htmlFor = id;
+            var tip = buildEl('span', null, line);
             tip.textContent = text;
             return line;
         }
@@ -2925,7 +2926,8 @@
         // 「复制题目答案」：把已提交测验的题干/答案/对错整理成文本复制出去
         function buildCopyScoreButton() {
             var wrap = buildEl('span', 'color: #ccc; padding-left: 10px;');
-            var btn = buildEl('button', 'margin-left: 13px; padding: 0 5px; font-size: 12px; cursor: pointer;', wrap);
+            var btn = buildEl('button', null, wrap);
+            btn.className = 'uoc-btn';
             btn.textContent = '复制题目答案';
             btn.onclick = function() {
                 try {
@@ -2966,7 +2968,7 @@
             // 不做滑条了 —— 滑条能拖到 2.5x/3x/4x, 那些档会被平台判为无效观看并触发风控。
             var rateSelect = document.createElement('select');
             rateSelect.id = 'rate-select';
-            rateSelect.style = 'margin-left: 10px; font-size: 12px; padding: 1px 4px; border: none; border-radius: 4px; background: #3a3a3a; color: #eee; cursor: pointer;';
+            rateSelect.className = 'uoc-select';
             rateSelect.title = '倍数档位：实测 2x / 2.25x 平台正常打勾；2.5x 及以上会被判为无效观看（视频不打勾＝白刷）且触发风控，故不提供';
             SAFE_RATES.forEach(function(r) {
                 var opt = document.createElement('option');
@@ -2996,13 +2998,13 @@
             var copyButton = buildCopyScoreButton();
 
             // 创建LLM答题复选框和设置按钮
-            var llmContainer = document.createElement('p');
-            llmContainer.style = 'color: #ccc; padding-left: 10px; display: flex; align-items: center;';
+            var llmContainer = document.createElement('span');
+            llmContainer.className = 'uoc-inline';
 
             // 创建设置按钮（齿轮图标）
             var settingBtn = document.createElement('span');
             settingBtn.innerHTML = '⚙️';
-            settingBtn.style = 'margin-left: 15px; font-size: 16px; cursor: pointer; margin-right: 5px;';
+            settingBtn.className = 'uoc-gear';
             settingBtn.title = '配置AI答题参数';
             settingBtn.onclick = function() {
                 LLMConfig.showConfigUI();
@@ -3013,7 +3015,7 @@
             llmCheckbox.id = llmCheckbox.name = llmCheckbox.value = 'llm';
             llmCheckbox.type = 'checkbox';
             llmCheckbox.checked = window.llmEnabled;
-            llmCheckbox.style = 'width: 12px; height: 12px;';
+            llmCheckbox.className = 'uoc-check';
             llmCheckbox.onchange = function(event) {
                 window.llmEnabled = event.target.checked;
                 console.log('[UOOC助手] LLM答题', window.llmEnabled ? '已启用' : '已禁用');
@@ -3036,7 +3038,7 @@
             var llmLabel = document.createElement('label');
             llmLabel.htmlFor = 'llm';
             llmLabel.innerText = 'LLM答题';
-            llmLabel.style = 'margin-left: 13px; font-size: 12px;';
+            llmLabel.className = 'uoc-toggle-text';
 
             // 创建"开始答题"按钮
             var answerBtn = document.createElement('button');
@@ -3189,7 +3191,7 @@
             var progressBtn = document.createElement('button');
             progressBtn.innerText = '📊 进度';
             progressBtn.title = '显示/隐藏学习进度悬浮窗';
-            progressBtn.style = 'margin-left: 8px; padding: 2px 8px; font-size: 12px; cursor: pointer; border: none; border-radius: 4px; background: #3a3a3a; color: #eee;';
+            progressBtn.className = 'uoc-btn';
             progressBtn.onclick = function() {
                 var panel = ensureProgressPanel();
                 var show = (panel.style.display === 'none' || !panel.style.display);
@@ -3197,20 +3199,13 @@
                 if (show) refreshProgressPanel();
             };
 
-            container.appendChild(llmContainer);
-            container.appendChild(rateCheckbox);
-            container.appendChild(volumeCheckbox);
-            container.appendChild(playCheckbox);
-            container.appendChild(continueCheckbox);
-            container.appendChild(copyButton);
-            container.appendChild(progressBtn);
             // 【v2.16.0】「自动讨论」已下架（帮人代发发言不再提供）。
             // 现在只帮到"复制题目"这一步：点一下把当前讨论页的题目复制到剪贴板，
             // 使用者自己拿去问 DeepSeek/豆包等 AI，把回答粘进页面回复框发表。
             var discussBtn = document.createElement('button');
             discussBtn.innerText = '📋 复制题目';
             discussBtn.title = '复制当前讨论页的题目，拿去问 DeepSeek 等 AI，再把回答粘进回复框发表';
-            discussBtn.style = 'margin-left: 8px; padding: 2px 8px; font-size: 12px; cursor: pointer; border: none; border-radius: 4px; background: #3d5a80; color: #fff;';
+            discussBtn.className = 'uoc-btn uoc-btn-blue';
             discussBtn.onclick = function() {
                 var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
                 if (!topic || !topic.trim()) {
@@ -3240,13 +3235,46 @@
                 catch (e) { prompt('复制失败，请手动复制题目：', text); }
                 document.body.removeChild(ta);
             }
-            container.appendChild(discussBtn);
+            // —— 分区组装：播放配置 | AI答题 | 工具 ——
+            function buildGroup(label) {
+                var g = buildEl('span', null);
+                g.className = 'uoc-group';
+                var cap = buildEl('span', null, g);
+                cap.className = 'uoc-group-label';
+                cap.textContent = label;
+                return g;
+            }
+
+            var gPlay = buildGroup('播放');
+            gPlay.appendChild(rateCheckbox);
+            gPlay.appendChild(volumeCheckbox);
+            gPlay.appendChild(playCheckbox);
+            gPlay.appendChild(continueCheckbox);
+
+            var gAI = buildGroup('AI答题');
+            gAI.appendChild(settingBtn);
+            gAI.appendChild(llmCheckbox);
+            gAI.appendChild(llmLabel);
+            gAI.appendChild(answerBtn);
+            gAI.appendChild(autoAnswerCheckbox);
+            gAI.appendChild(autoAnswerLabel);
+            gAI.appendChild(autoSubmitCheckbox);
+            gAI.appendChild(autoSubmitLabel);
+
+            var gTools = buildGroup('工具');
+            gTools.appendChild(discussBtn);
+            gTools.appendChild(copyButton);
+            gTools.appendChild(progressBtn);
+
+            container.appendChild(gPlay);
+            container.appendChild(gAI);
+            container.appendChild(gTools);
         }
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by 理不尽 | v3.0.0';
-            div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
+            div.className = 'uoc-brand';
+            div.innerHTML = 'UOOC助手 by 理不尽 | v3.1.0';
             container.appendChild(div);
         }
 
@@ -3274,21 +3302,62 @@
             'left: 0',
             'right: 0',
             'z-index: 99999', // 高于优课自身 UI, 但不至于压住阿里云智能验证那一层
-            'background: rgba(28, 28, 30, 0.94)',
+            'background: rgba(24, 24, 27, 0.96)',
             'display: flex',
             'flex-direction: row',
             'align-items: center',
             'flex-wrap: wrap',
-            'padding: 2px 10px',
-            'box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35)'
+            'gap: 8px',
+            'padding: 5px 12px',
+            'box-shadow: 0 1px 8px rgba(0, 0, 0, 0.4)',
+            'font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif'
         ].join(';') + ';';
+
+        // 分区/按钮皮肤（挂 <style> 一次即可；重建 UI 不重复注入）
+        if (!document.getElementById('uooc-bar-skin')) {
+            var skin = document.createElement('style');
+            skin.id = 'uooc-bar-skin';
+            skin.textContent = [
+                // —— 分组胶囊 ——
+                '.uoc-group{display:inline-flex;align-items:center;padding:3px 10px;',
+                '  background:rgba(255,255,255,0.07);border-radius:9px;}',
+                '.uoc-group-label{font-size:10px;color:#8e8e93;margin-right:8px;',
+                '  letter-spacing:2px;user-select:none;}',
+                // —— 开关 ——
+                '.uoc-toggle{display:inline-flex;align-items:center;font-size:12px;',
+                '  color:#d8d8dc;margin-left:10px;cursor:pointer;white-space:nowrap;}',
+                '.uoc-toggle:first-child{margin-left:2px;}',
+                '.uoc-toggle input{width:12px;height:12px;margin:0 4px 0 0;accent-color:#930A41;cursor:pointer;}',
+                '.uoc-toggle:hover{color:#fff;}',
+                '.uoc-toggle-text{font-size:12px;color:#d8d8dc;margin:0 4px;}',
+                '.uoc-check{width:12px;height:12px;margin:0 4px;accent-color:#930A41;cursor:pointer;}',
+                // —— 按钮 ——
+                '.uoc-btn{margin-left:6px;padding:3px 10px;font-size:12px;border:none;',
+                '  border-radius:6px;background:#48484c;color:#eee;cursor:pointer;',
+                '  transition:background .15s,transform .08s;white-space:nowrap;}',
+                '.uoc-btn:hover{background:#5c5c62;}',
+                '.uoc-btn:active{transform:scale(0.96);}',
+                '.uoc-btn-blue{background:#3d5a80;}',
+                '.uoc-btn-blue:hover{background:#4d709f;}',
+                // —— 选择器 / 图标 ——
+                '.uoc-select{margin-left:8px;font-size:12px;padding:2px 4px;border:none;',
+                '  border-radius:6px;background:#48484c;color:#eee;cursor:pointer;}',
+                '.uoc-gear{font-size:15px;cursor:pointer;margin:0 6px 0 0;',
+                '  transition:transform .3s;display:inline-block;}',
+                '.uoc-gear:hover{transform:rotate(90deg);}',
+                // —— 署名 ——
+                '.uoc-brand{color:#6e6e73;font-size:10px;margin-left:auto;',
+                '  padding:0 4px;white-space:nowrap;}'
+            ].join('');
+            document.head.appendChild(skin);
+        }
 
         // 控制台容器
         var checkboxContainer = buildRow('checkbox-container');
-        checkboxContainer.style.cssText = 'display: flex; flex-direction: row; align-items: center; flex-wrap: wrap;';
+        checkboxContainer.style.cssText = 'display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 2px;';
         buildControlPanel(checkboxContainer);
-        setAttribution(checkboxContainer);
         bar.appendChild(checkboxContainer);
+        setAttribution(bar);
 
         // 折叠把手：作为控制条内的最后一个元素（margin-left:auto 推到行尾）。
         // 收起时把控制条本身缩成右上角一个小胶囊 —— 把手就长在条里，既不用为它预留空白，
@@ -3296,11 +3365,13 @@
         var toggleBtn = document.createElement('div');
         toggleBtn.id = 'control-panel-toggle';
         toggleBtn.style.cssText = [
-            'margin-left: auto', 'width: 20px', 'height: 16px', 'line-height: 16px',
+            'width: 22px', 'height: 18px', 'line-height: 18px',
             'text-align: center', 'font-size: 11px', 'color: #ccc',
-            'background: rgba(85, 85, 85, 0.9)', 'border-radius: 4px',
-            'cursor: pointer', 'user-select: none'
+            'background: rgba(255, 255, 255, 0.1)', 'border-radius: 6px',
+            'cursor: pointer', 'user-select: none', 'transition: background .15s'
         ].join(';') + ';';
+        toggleBtn.onmouseenter = function() { toggleBtn.style.background = 'rgba(255,255,255,0.2)'; };
+        toggleBtn.onmouseleave = function() { toggleBtn.style.background = 'rgba(255, 255, 255, 0.1)'; };
         toggleBtn.title = '收起 / 展开 UOOC 助手控制条';
         var setCollapsed = function(collapsed) {
             checkboxContainer.style.display = collapsed ? 'none' : 'flex';
