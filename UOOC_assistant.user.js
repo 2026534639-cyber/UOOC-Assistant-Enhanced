@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.11.1
+// @version      2.12.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.11.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.12.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2067,7 +2067,7 @@
     //   · 提问型 / 学术性：几乎不设新意门槛 —— 题目就是让你答，答对答全才是重点
     //   · 开放式（"谈谈你的看法"）：稍有门槛，避免跟人雷同得像复制
     // 硬判重（dup）只在"几乎逐字照抄"时才拦，不再因为"意思相近"就整条否掉。
-    var QUESTION_LINES = { ok: 0.85, dup: { floor: 8, ratio: 0.85 } };  // 只有近乎整句照搬才拦
+    var QUESTION_LINES = { ok: 1.0, dup: { floor: 8, ratio: 0.98 } };   // 提问型：只有逐字照抄才拦
     var OPEN_LINES = { ok: 0.60, dup: { floor: 8, ratio: 0.55 } };
 
     function chooseReplies(cands, existing, maxWant, lines) {
@@ -2626,10 +2626,12 @@
                 if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
             }
             // 聚合 → 评分 → 按质量定条数（提问型把"新意"门槛放宽：答对更重要）
-            // 提问型 / 学术性讨论：基本不设新意门槛（0.85），只要不是照抄就答
+            // 提问型 / 学术性讨论：不设新意门槛、也不做近似判重 ——
+            // 有标准答案的题，大家答的内容本来就近乎一样，"像"不能成为不发的原因；
+            // 唯一还拦的是逐字照抄（与已有发言整段一致）
             var lines = questionTopic ? QUESTION_LINES : OPEN_LINES;
             var pick = chooseReplies(parsed, existing, REPLY_MAX, lines);
-            if (questionTopic) console.log('[UOOC助手-讨论] 这是提问型/学术性讨论 → 基本不设新意门槛（≤0.85 即发，且至少发 1 条）');
+            if (questionTopic) console.log('[UOOC助手-讨论] 这是提问型/学术性讨论 → 不设新意门槛、不做近似判重（只有逐字照抄才拦）');
             console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
                         parsed.length + ' 条 → ' + pick.why);
             if (pick.list.length > 0) return pick.list;
@@ -2650,10 +2652,14 @@
             if (window.__uoocDiscussSweep) window.__uoocSweepGenAt = 0;
             fresh = fresh || [];
             if (fresh.length === 0) {
-                if (window.__uoocDiscussSweep) touchSweepPanel('没有够格发的发言，跳过这个讨论');
+                if (window.__uoocDiscussSweep) {
+                    touchSweepPanel(questionTopic
+                        ? 'AI 写出的内容跟已有发言逐字雷同，跳过（提问型只有这种情况才跳）'
+                        : '没有够格发的发言，跳过这个讨论');
+                }
                 console.log('[UOOC助手-讨论] 清扫推进 → 跳过该讨论，去找下一个（已处理 ' + (window.__uoocSweepPosted || 0) + ' 个）');
                 console.log('[UOOC助手-讨论] 跳过这个讨论：已有 ' + existing.length + ' 条发言，' +
-                            (questionTopic ? '（提问型，门槛已放宽到 0.85）' : '（开放式讨论，门槛 0.60）') +
+                            (questionTopic ? '（提问型，不做近似判重）' : '（开放式讨论，门槛 0.60）') +
                             '本次候选没有一条过线。若你认为该发，把上面"候选评分"那行发我调阈值');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
@@ -3358,7 +3364,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.11.1';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.12.0';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
