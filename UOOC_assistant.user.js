@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.15.1
+// @version      2.15.2
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.15.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.15.2 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2033,6 +2033,17 @@
         return frags;
     }
 
+    // 话题是不是"提问型"（问一个知识性问题）。
+    // 提问型讨论（"什么叫函数的定义域？"）里【把问题答对答清楚】才是重点，
+    // 跟别人说得像不代表没价值 —— 题目问的就是这个；只影响提示词侧重，不影响取舍。
+    function isQuestionTopic(topic) {
+        var t = String(topic || '');
+        if (/[？?]/.test(t)) return true;
+        return /(什么叫|什么是|是什么|为什么|怎么|如何|是否|能不能|可不可以|举例说明|谈谈.*的(理解|区别|关系))/.test(t);
+    }
+
+    var REPLY_MAX = 3;        // 每个讨论最多发几条（好写的最多发这么多）
+
     // 从候选里挑出要发的条数（1~3，按随机抽样保持多样性）。
     // 【不再有"够不够格"】跟已有发言像不像一概不管 —— 用户明确要求：学术题尽量答。
     // 唯一拦的是【跟某条已有发言一字不差】（原样复读别人，发了也没意义）。
@@ -2578,6 +2589,7 @@
             touchSweepPanel('第 ' + ((window.__uoocSweepPosted || 0) + 1) + ' 个讨论：正在读取话题与已有发言…');
         }
         var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
+        var parsed0Len = 0;   // 本讨论解析出的候选数（跳过时的日志要用，生成后才填）
         // 新版讨论页回复框是普通 textarea(不再是 UEditor) —— 判据要跟着改,
         // 否则在没有 UE 实例的页面上会被误判成"未就绪"而跳过整个讨论
         var replyBox = document.querySelector('.replay-editor textarea[ng-model="content"]') ||
@@ -2612,29 +2624,27 @@
         callLLMText(prompt, 60000, { temperature: 0.95 }).then(function(resp) {
             if (window.__uoocDiscussSweep) window.__uoocSweepGenAt = 0;
             var parsed = parseNumberedReplies(resp, CAND);
+            parsed0Len = parsed.length;
             if (parsed.length === 0) {
                 // 解析不出来 ≠ 内容重复 —— 分开报，免得把"格式不对"当"重复"直接跳过整个讨论
                 console.log('[UOOC助手-讨论] ⚠️ AI 返回内容解析不出条目，原文前 200 字:', String(resp || '').slice(0, 200));
                 if (window.__uoocDiscussSweep) touchSweepPanel('⚠️ AI 返回格式无法解析，跳过该讨论');
             }
-            // 聚合 → 评分 → 按质量定条数（提问型把"新意"门槛放宽：答对更重要）
-            // 提问型 / 学术性讨论：不设新意门槛、也不做近似判重 ——
-            // 有标准答案的题，大家答的内容本来就近乎一样，"像"不能成为不发的原因；
-            // 唯一还拦的是逐字照抄（与已有发言整段一致）
-            var lines = { ok: 1.0, dup: REPLY_DUP };
-            var pick = chooseReplies(parsed, existing, REPLY_MAX, lines);
+            // 聚合（字面近似的归成一簇）→ 随机抽样 → 最多 REPLY_MAX 条；
+            // 不设"新意"门槛、不做近似判重 —— 唯一拦的是【跟某条已有发言一字不差】。
+            var pick = chooseReplies(parsed, existing, REPLY_MAX);
             if (questionTopic) console.log('[UOOC助手-讨论] 这是提问型/学术性讨论 → 不设新意门槛、不做近似判重（只有逐字照抄才拦）');
             console.log('[UOOC助手-讨论] AI 返回 ' + String(resp || '').length + ' 字 → 解析出 ' +
-                        parsed.length + ' 条 → ' + pick.why);
-            if (pick.list.length > 0) return pick.list;
+                        parsed.length + ' 条 → 本次发 ' + pick.length + ' 条');
+            if (pick.length > 0) return pick;
             if (parsed.length === 0) return [];
-            // 一条都不够格 → 再试一次"融合重写"，把草稿重新加工成角度分明的新发言
-            if (window.__uoocDiscussSweep) touchSweepPanel('候选都不够新意，正在融合重写…');
+            // 一条都发不了 → 再试一次"融合重写"，把草稿重新加工成角度分明的新发言
+            if (window.__uoocDiscussSweep) touchSweepPanel('候选都与已有发言重合，正在融合重写…');
             var fuse = buildFusePrompt(topic, existing, parsed.slice(0, 5), REPLY_MAX);
             return callLLMText(fuse, 60000, { temperature: 0.95 }).then(function(resp2) {
-                var again = chooseReplies(parseNumberedReplies(resp2, CAND), existing, REPLY_MAX, lines);
-                console.log('[UOOC助手-讨论] 融合后：' + again.why);
-                return again.list;
+                var again = chooseReplies(parseNumberedReplies(resp2, CAND), existing, REPLY_MAX);
+                console.log('[UOOC助手-讨论] 融合后：本次发 ' + again.length + ' 条');
+                return again;
             }).catch(function(e) {
                 console.log('[UOOC助手-讨论] 融合失败(' + e.message + ')，这个讨论跳过');
                 return [];
@@ -2645,12 +2655,11 @@
             fresh = fresh || [];
             if (fresh.length === 0) {
                 if (window.__uoocDiscussSweep) {
-                    touchSweepPanel('AI 这次写出的内容跟已有发言几乎一字不差，跳过这个讨论');
+                    touchSweepPanel('候选都没能发（解析不出或与已有发言一字不差），跳过这个讨论');
                 }
                 console.log('[UOOC助手-讨论] 清扫推进 → 跳过该讨论，去找下一个（已处理 ' + (window.__uoocSweepPosted || 0) + ' 个）');
-                console.log('[UOOC助手-讨论] 跳过这个讨论：已有 ' + existing.length + ' 条发言，' +
-                            (questionTopic ? '（提问型，不做近似判重）' : '（开放式讨论，门槛 0.60）') +
-                            '本次候选没有一条过线。若你认为该发，把上面"候选评分"那行发我调阈值');
+                console.log('[UOOC助手-讨论] 跳过原因：解析出 ' + parsed0Len + ' 条候选，逐字判重后 0 条可发。' +
+                            '若控制台上方有"AI 返回内容解析不出条目"的提示，那是格式问题不是判重问题');
                 window.__uoocSilentAnswer = false;
                 window.__uoocNavPending = false;
                 window.__uoocLastForwardClick = Date.now();
@@ -3354,7 +3363,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.15.1';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.15.2';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
