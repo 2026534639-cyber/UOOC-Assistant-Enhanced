@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC 助手
 // @namespace    http://tampermonkey.net/
-// @version      3.2.1
+// @version      3.3.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       理不尽
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v3.2.1 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v3.3.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1010,19 +1010,27 @@
 
         try {
             async function sendLLMRequest(messages) {
-                return fetch(`${config.baseUrl}/chat/completions`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${config.apiKey}`
-                    },
-                    body: JSON.stringify({
-                        model: config.model || 'gpt-4o',
-                        messages: messages,
-                        temperature: 0.3,
-                        max_tokens: 4000
-                    })
-                });
+                // 90 秒强制超时：题多的卷子整体请求会拖很久, 不设超时会永远悬着
+                const ctrl = new AbortController();
+                const timer = setTimeout(function() { ctrl.abort(); }, 90000);
+                try {
+                    return await fetch(`${config.baseUrl}/chat/completions`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${config.apiKey}`
+                        },
+                        signal: ctrl.signal,
+                        body: JSON.stringify({
+                            model: config.model || 'gpt-4o',
+                            messages: messages,
+                            temperature: 0.3,
+                            max_tokens: 8000
+                        })
+                    });
+                } finally {
+                    clearTimeout(timer);
+                }
             }
 
             const textMessages = [
@@ -1148,8 +1156,8 @@
                     window.__uoocLastLLMResponse = t2;
                     answers = parseAnswers(t2, questions);
                 }
-            } else {
-                // 无图片题目: 单次文本请求
+            } else if (questions.length <= 12) {
+                // 小卷: 单次文本请求
                 const response = await sendLLMRequest(textMessages);
                 if (!response.ok) {
                     throw new Error(`API请求失败: ${response.status} ${response.statusText}`);
@@ -1159,6 +1167,52 @@
                 console.log('[UOOC助手-AI] LLM返回:', answerText);
                 window.__uoocLastLLMResponse = answerText;
                 answers = parseAnswers(answerText, questions);
+            } else {
+                // 大卷 (如 40 题的章节测验): 一整包发出去响应又长又容易被截断,
+                // 解析对不上号就"整套失效" —— 改成按 10 题一批分开发, 每批独立解析、独立重试,
+                // 一批失败不拖垮其余题目。
+                console.log('[UOOC助手-AI] 共 ' + questions.length + ' 题, 分批作答 (每批 10 题)...');
+                answers = [];
+                var rawLog = [];
+                const CHUNK = 10;
+                for (var base = 0; base < questions.length; base += CHUNK) {
+                    var chunk = questions.slice(base, base + CHUNK);
+                    // 批内题号重编成 1..n (parseAnswers 按题号-1 对位), 答案再按批内位置并回总表
+                    var reindexed = chunk.map(function(q, i) {
+                        return Object.assign({}, q, { index: i + 1 });
+                    });
+                    var chunkAnswers = null;
+                    for (var attempt = 0; attempt < 2; attempt++) {
+                        try {
+                            var resp = await sendLLMRequest([
+                                { role: 'system', content: '你是一个专业的答题助手，请严格按照要求的格式返回答案。' },
+                                { role: 'user', content: buildPrompt(reindexed) }
+                            ]);
+                            if (!resp.ok) { rawLog.push('批 ' + (base / CHUNK + 1) + ': HTTP ' + resp.status); continue; }
+                            var d = await resp.json();
+                            var txt = (d.choices && d.choices[0] && d.choices[0].message.content) || '';
+                            var finish = (d.choices && d.choices[0] && d.choices[0].finish_reason) || '';
+                            if (finish === 'length') rawLog.push('批 ' + (base / CHUNK + 1) + ': 回答被截断(length)');
+                            chunkAnswers = parseAnswers(txt, reindexed);
+                            var gotN = chunkAnswers.filter(function(a) { return a && a.length; }).length;
+                            console.log('[UOOC助手-AI] 批 ' + (base / CHUNK + 1) + '/' + Math.ceil(questions.length / CHUNK) +
+                                        ' (' + chunk.length + ' 题): 解析出 ' + gotN + ' 题' + (attempt > 0 ? ' [重试]' : ''));
+                            if (gotN >= chunk.length) break;           // 全批答满
+                            if (gotN > 0 && attempt === 0) continue;    // 部分成功 → 重试补齐这一批
+                            if (gotN > 0) break;                        // 重试后仍不完整 → 保留已得
+                        } catch (e) {
+                            rawLog.push('批 ' + (base / CHUNK + 1) + ': (' + e.message + ')');
+                        }
+                    }
+                    if (chunkAnswers) {
+                        for (var ci = 0; ci < chunk.length; ci++) {
+                            if (chunkAnswers[ci] && chunkAnswers[ci].length) answers[base + ci] = chunkAnswers[ci];
+                        }
+                    }
+                }
+                var got = answers.filter(function(a) { return a && a.length; }).length;
+                window.__uoocLastLLMResponse = rawLog.join(' | ') || ('分批完成: ' + got + '/' + questions.length);
+                console.log('[UOOC助手-AI] 分批作答完成: ' + got + '/' + questions.length + ' 题');
             }
 
             return answers;
@@ -3253,7 +3307,7 @@
         function setAttribution(container) {
             var div = document.createElement('div');
             div.className = 'uoc-brand';
-            div.innerHTML = 'UOOC助手 by 理不尽 | v3.2.1';
+            div.innerHTML = 'UOOC助手 by 理不尽 | v3.3.0';
             container.appendChild(div);
         }
 
