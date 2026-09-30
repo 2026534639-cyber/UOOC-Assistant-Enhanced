@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         UOOC assistant
+// @name         UOOC 助手
 // @namespace    http://tampermonkey.net/
-// @version      2.16.0
+// @version      3.0.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
-// @author       cc & wybbb1 (原作者); 理不尽 (维护)
+// @author       理不尽
 // @include      https://www.uooc.net.cn/home/learn/*
 // @include      https://www.uooc.net.cn/home/course/exam/*
 // @include      https://www.uooc.net.cn/home/exam/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.16.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v3.0.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1423,251 +1423,139 @@
         console.log('[UOOC助手-AI] 在视频页面点击"🤖 开始答题"按钮即可开始AI答题');
     }
 
-    // ==================== 原有视频助手功能 ====================
+    // ==================== 播放器与课程页核心 ====================
 
-    // 修复CID提取 - 支持新旧URL格式
-    function ckeckTestIgnorable() {
-        var cid = extractCid();
-        console.log('[UOOC助手] 课程ID:', cid);
 
-        if (!cid) {
-            console.warn('[UOOC助手] 无法获取课程ID，跳过测验检查');
-            window.canIgnoreTest = false;
-            return;
-        }
-
-        // 使用原生fetch替代jQuery $.ajax (新页面可能不加载jQuery)
-        // 动态构造请求URL：直接访问用 www.uooc.net.cn，WebVPN 则通过代理域名
-        var isWebVpn = location.hostname.indexOf('webvpn') !== -1;
-        var fetchUrl = isWebVpn
-            ? location.origin + '/https/www.uooc.net.cn/home/learn/getCourseLearn?cid=' + encodeURIComponent(cid)
-            : 'https://www.uooc.net.cn/home/learn/getCourseLearn?cid=' + encodeURIComponent(cid);
-        fetch(fetchUrl, {
-            method: 'GET',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
+    // 全局目录/播放器监听：SPA 切换章节时播放器会被整棵换掉。
+    // 不再逐个盯旧版/新版页面的内部节点，直接在 body 上挂一个观察者：
+    // 页面上(重新)出现播放器 → 把播放设置重新应用一遍（应用流程幂等，多跑无害）。
+    function watchCourseTree() {
+        var lastSeen = 0;
+        new MutationObserver(function() {
+            var now = Date.now();
+            if (now - lastSeen < 300) return;   // 目录重建一次会涌出成百条变异，节流
+            lastSeen = now;
+            if (document.querySelector('video#player_html5_api') ||
+                document.querySelector('video.vjs-tech') ||
+                document.querySelector('[source-view] [uooc-video] video') ||
+                document.querySelector('video')) {
+                console.log('[UOOC助手] 页面内容变化 → 重新应用播放设置');
+                setTimeout(videoPulse, 250);
             }
-        })
-        .then(function(response) {
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
-            return response.json();
-        })
-        .then(function(res) {
-            window.canIgnoreTest = Boolean(res.data && res.data.course_learn_mode === '20');
-            console.log('[UOOC助手] 可忽略测验:', window.canIgnoreTest);
-        })
-        .catch(function(err) {
-            console.log('[UOOC助手] 获取课程学习模式失败，使用默认设置:', err.message);
-            window.canIgnoreTest = false;
-        });
+        }).observe(document.body, { childList: true, subtree: true });
     }
 
-    // 绑定章节变化 - 增强对新页面的兼容性
-    function bindChapterChange() {
-        function bindSubChapterChange() {
-            // 新旧页面可能有不同的选择器
-            // 旧页面: [source-view] | 新页面: newlearn-source-video, .video-js
-            var sourceView = document.querySelector('[source-view]') ||
-                             document.querySelector('newlearn-source-video') ||
-                             document.querySelector('.newlearn_source_video') ||
-                             document.querySelector('.video-js') ||
-                             document.querySelector('.newlearn_center_bottom_content');
-            if (!sourceView) return;
-            var sObserver = new MutationObserver(function(mutations) {
-                if (document.querySelector('[source-view] [uooc-video] video') ||
-                    document.querySelector('video#player_html5_api') ||
-                    document.querySelector('video.vjs-tech')) {
-                    console.log('[UOOC助手] 检测到视频变化');
-                    setTimeout(start, 250);
+
+    // 视频中途弹题：优课会弹一个层来确认人还在看。
+    // 弹层节点 ID 固定是 "layui-layerN" 家族 —— 在 body 上挂全局观察者，
+    // 见到新弹层就尝试作答，不用等某个特定容器先渲染出来。
+    function watchQuizPopups() {
+        // 触发一次 AI 答题（按钮可能还没就绪，缓 500ms 再点）
+        function pokeAI(tag) {
+            setTimeout(function() {
+                var btn = document.getElementById('llm-answer-btn');
+                if (btn && !btn.disabled) {
+                    console.log('[UOOC助手-AI] 自动触发AI答题 (' + tag + ')');
+                    btn.click();
+                } else if (typeof autoAnswerQuiz === 'function') {
+                    autoAnswerQuiz();
                 }
-            });
-            sObserver.observe(sourceView, { childList: true });
+            }, 500);
         }
 
-        // 尝试多个可能的容器选择器
-        // 旧页面: .learn-main-left | 新页面: .newlearn_sidebar
-        var mainLeft = document.querySelector('.learn-main-left') ||
-                       document.querySelector('.learn-sidebar') ||
-                       document.querySelector('.course-sidebar') ||
-                       document.querySelector('.chapter-tree') ||
-                       document.querySelector('.newlearn_sidebar') ||
-                       document.querySelector('.newlearn_left');
-
-        if (!mainLeft) {
-            console.log('[UOOC助手] 未找到章节容器元素，跳过章节绑定');
-            return;
-        }
-
-        var mObserver = new MutationObserver(function(mutations) {
-            bindSubChapterChange();
-        });
-        mObserver.observe(mainLeft, { childList: true });
-        bindSubChapterChange();
-    }
-
-    function autoQuiz() {
-        // 从所有元素的source属性中查找包含真实JSON数据的那个 (新旧页面兼容)
-        // 新页面的[uooc-video]元素的source属性值为"curSource" (Angular引用)，
-        // 实际JSON数据存放在另一个元素的source属性中
-        function findSourceData() {
-            // 策略1: 搜索所有带source属性的元素，找到第一个包含JSON的
-            var allSourceElems = document.querySelectorAll('[source], [data-source]');
-            for (var i = 0; i < allSourceElems.length; i++) {
-                var attr = allSourceElems[i].getAttribute('source') || allSourceElems[i].getAttribute('data-source');
-                if (attr && attr.startsWith('{')) {
-                    try {
-                        return { source: JSON.parse(attr), elem: allSourceElems[i] };
-                    } catch(e) {
-                        continue;
-                    }
+        // 弹题答案藏在页面某个元素的 source 属性里（JSON 字符串）。
+        // 新版页面的 [uooc-video] 上只放 Angular 引用名 "curSource"，
+        // 真数据在别的元素上 —— 所以扫全页，再不行就从 Angular 作用域里捞
+        function findQuizSource() {
+            var holders = document.querySelectorAll('[source], [data-source]');
+            for (var hi = 0; hi < holders.length; hi++) {
+                var raw = holders[hi].getAttribute('source') || holders[hi].getAttribute('data-source');
+                if (raw && raw.charAt(0) === '{') {
+                    try { return JSON.parse(raw); } catch (e) { /* 不是合法 JSON, 换下一个 */ }
                 }
             }
-
-            // 策略2: 尝试从Angular作用域获取
-            var sourceDiv = document.querySelector('div[uooc-video]') || document.querySelector('[source-view]');
-            if (sourceDiv && window.angular) {
+            var videoHolder = document.querySelector('div[uooc-video]') || document.querySelector('[source-view]');
+            if (videoHolder && window.angular) {
                 try {
-                    var scope = window.angular.element(sourceDiv).scope();
-                    if (scope && scope.curSource) {
-                        return { source: scope.curSource, elem: sourceDiv };
-                    }
-                } catch(e) {
+                    var scope = window.angular.element(videoHolder).scope();
+                    if (scope && scope.curSource) return scope.curSource;
+                } catch (e) {
                     console.log('[UOOC助手] 无法从Angular作用域获取源数据:', e.message);
                 }
             }
-
             return null;
         }
 
-        function autoQuizAnswer() {
+        function answerQuizPopup() {
             try {
-                // 查找测验弹窗层 (新旧页面兼容)
-                // 旧页面: #quizLayer, .smallTest-view | 新页面: .question_content, .layui-layer
-                var quizLayer = document.getElementById('quizLayer') ||
-                               document.querySelector('.quiz-layer, .smallTest-view, [class*="quiz"], .layui-layer, .modal-quiz, .question_content');
-                if (!quizLayer) return;
-
-                // 获取视频源数据
-                var sourceData = findSourceData();
-                if (!sourceData) {
-                    console.log('[UOOC助手] 未找到视频源数据');
-                    return;
-                }
-                var source = sourceData.source;
-
-                // 查找题目
-                var quizQuestion = document.querySelector('.smallTest-view .ti-q-c') ||
-                                   document.querySelector('.quiz-question .ti-q-c') ||
-                                   document.querySelector('.ti-q-c') ||
-                                   document.querySelector('.quiz-content .question');
-
-                if (!quizQuestion) return;
-
-                // 使用 extractMathText 支持 MathJax/LaTeX 数学公式 (返回 {text, images})
-                var mqResult = extractMathText(quizQuestion);
-                var quizQuestionText = mqResult.text || quizQuestion.innerHTML || quizQuestion.innerText;
-                if (!source.quiz || source.quiz.length === 0) return;
-
-// 使用规范化匹配 (对数学公式更鲁棒，跳过原始===比较)
-                var quizData;
-                var normalizedQ = normalizeText(quizQuestionText);
-                quizData = source.quiz.find(q => normalizeText(q.question) === normalizedQ);
-                
-                // 最后尝试部分匹配 (关键词)
-                if (!quizData) {
-                    for (var q of source.quiz) {
-                        if (q.question && quizQuestionText &&
-                            normalizeText(quizQuestionText).includes(normalizeText(q.question).substring(0, 20))) {
-                            quizData = q;
-                            break;
-                        }
+                // 弹层本体（旧版 #quizLayer，新版各类容器都试一遍）
+                var layer = document.getElementById('quizLayer') ||
+                            document.querySelector('.quiz-layer, .smallTest-view, [class*="quiz"], .layui-layer, .modal-quiz, .question_content');
+                if (!layer) return;
+                // 弹题答案存在课程页的 source JSON 里 —— 先把它找出来
+                var src = findQuizSource();
+                if (!src) { console.log('[UOOC助手] 未找到视频源数据'); return; }
+                if (!src.quiz || !src.quiz.length) return;
+                // 题干（带 MathJax/LaTeX 公式的用 extractMathText 抽成纯文本）
+                var holder = document.querySelector('.smallTest-view .ti-q-c') ||
+                             document.querySelector('.quiz-question .ti-q-c') ||
+                             document.querySelector('.ti-q-c') ||
+                             document.querySelector('.quiz-content .question');
+                if (!holder) return;
+                var mathInfo = extractMathText(holder);
+                var asked = mathInfo.text || holder.innerHTML || holder.innerText;
+                var askedKey = normalizeText(asked);
+                // 先按归一化全文精确匹配（比原始 === 对公式鲁棒）
+                var hit = src.quiz.find(function(q) { return normalizeText(q.question) === askedKey; });
+                // 再退一步做关键词部分匹配
+                if (!hit) {
+                    for (var qi = 0; qi < src.quiz.length; qi++) {
+                        var cand = src.quiz[qi];
+                        if (cand.question && asked &&
+                            askedKey.indexOf(normalizeText(cand.question).substring(0, 20)) >= 0) { hit = cand; break; }
                     }
                 }
-                
-                if (!quizData) {
-                    console.log('[UOOC助手] 未找到匹配的题目 (已尝试精确+模糊+部分匹配)');
-                    return;
-                }
-
-                var quizAnswer = quizData.answer;
-                var quizOptions = quizLayer.querySelector('div.ti-alist') ||
-                                 quizLayer.querySelector('.options-list') ||
-                                 quizLayer.querySelector('[class*="option"]');
-                if (!quizOptions) return;
-
-                var answers = eval(quizAnswer);
-                for (let ans of answers) {
-                    var idx = ans.charCodeAt() - 'A'.charCodeAt();
-                    if (quizOptions.children[idx]) {
-                        quizOptions.children[idx].click();
-                    }
-                }
-                var submitBtn = quizLayer.querySelector('button');
-                if (submitBtn) submitBtn.click();
-                console.log('[UOOC助手] 自动答题完成');
+                if (!hit) { console.log('[UOOC助手] 未找到匹配的题目 (已尝试精确+部分匹配)'); return; }
+                var optionBox = layer.querySelector('div.ti-alist') ||
+                                layer.querySelector('.options-list') ||
+                                layer.querySelector('[class*="option"]');
+                if (!optionBox) return;
+                // answer 存的是选项字母串（如 "AC"）→ 换算成下标逐个点选
+                (eval(hit.answer) || []).forEach(function(letter) {
+                    var cell = optionBox.children[letter.charCodeAt() - 65];
+                    if (cell) cell.click();
+                });
+                var submit = layer.querySelector('button');
+                if (submit) submit.click();
+                console.log('[UOOC助手] 弹题自动作答完成');
             } catch (err) {
-                console.error('[UOOC助手] 自动答题出错:', err);
+                console.error('[UOOC助手] 弹题自动作答出错:', err);
             }
         }
 
-        var learnView = document.querySelector('.lean_view') ||
-                        document.querySelector('.learn-view') ||
-                        document.querySelector('.video-view') ||
-                        document.querySelector('.learn-main') ||
-                        document.querySelector('.video-player-container') ||
-                        document.querySelector('.newlearn_center') ||
-                        document.querySelector('.newlearn_center_bottom') ||
-                        document.querySelector('.new_learn_content') ||
-                        document.querySelector('.main') ||
-                        document.body;
-
-        if (!learnView) return;
-        var observer = new MutationObserver(function(mutations) {
-            for (let mutation of mutations) {
-                let node = mutation.addedNodes[0];
-                if (node && node.id && node.id.includes('layui-layer')) {
-                    console.log('[UOOC助手] 检测到测验弹窗');
-                    autoQuizAnswer();
-                    // 新增：如果自动LLM答题已启用，同时触发AI答题
-                    if (window.llmAutoAnswer && document.getElementById('llm-answer-btn')) {
-                        console.log('[UOOC助手-AI] 自动触发AI答题');
-                        setTimeout(function() {
-                            var btn = document.getElementById('llm-answer-btn');
-                            if (btn && !btn.disabled) {
-                                btn.click();
-                            }
-                        }, 500);
-                    }
+        new MutationObserver(function(muts) {
+            for (var mi = 0; mi < muts.length; mi++) {
+                var added = muts[mi].addedNodes && muts[mi].addedNodes[0];
+                if (!added) continue;
+                if (added.id && added.id.indexOf('layui-layer') === 0) {
+                    console.log('[UOOC助手] 检测到弹窗层');
+                    answerQuizPopup();
+                    if (window.llmAutoAnswer) pokeAI('弹题');
                     break;
                 }
-                // 新增：检测新页面可能的弹窗类名
-                if (node && node.classList) {
-                    let classStr = Array.from(node.classList).join(' ');
-                    if (classStr.includes('quiz') || classStr.includes('layer')) {
-                        console.log('[UOOC助手] 检测到可能的测验弹窗:', node.tagName, node.className);
-                        setTimeout(autoQuizAnswer, 300);
-                        // 新增：如果自动LLM答题已启用，同时触发AI答题
-                        if (window.llmAutoAnswer) {
-                            setTimeout(function() {
-                                if (document.getElementById('llm-answer-btn')) {
-                                    var btn = document.getElementById('llm-answer-btn');
-                                    if (btn && !btn.disabled) {
-                                        console.log('[UOOC助手-AI] 自动触发AI答题 (弹窗检测)');
-                                        btn.click();
-                                    }
-                                } else if (typeof autoAnswerQuiz === 'function') {
-                                    void autoAnswerQuiz();
-                                }
-                            }, 500);
-                        }
+                // 新版页面兜底：插入节点的 class 带 quiz/layer 也当弹窗线索
+                if (added.classList) {
+                    var cls = String(added.className || '');
+                    if (cls.indexOf('quiz') >= 0 || cls.indexOf('layer') >= 0) {
+                        console.log('[UOOC助手] 检测到可能的测验弹窗:', added.tagName, cls);
+                        setTimeout(answerQuizPopup, 300);
+                        if (window.llmAutoAnswer) pokeAI('弹窗检测');
                     }
                 }
             }
-        });
-        observer.observe(learnView, { childList: true });
+        }).observe(document.body, { childList: true, subtree: true });
     }
+
 
     // 全局视频元素引用 (SPA导航时会被更新)
     window.__uoocVideo = null;
@@ -1742,7 +1630,7 @@
     }
 
     // 绑定视频事件 - 增强兼容性 (SPA导航时重新绑定)
-    function bindVideoEvents() {
+    function attachVideoListeners() {
         var video = getCurrentVideo();
         if (!video) {
             console.log('[UOOC助手] 未找到视频元素');
@@ -2853,16 +2741,16 @@
         return true;
     }
 
-    function start() {
-        console.log('[UOOC助手] start() 函数执行');
+    function videoPulse() {
+        console.log('[UOOC助手] videoPulse() 函数执行');
 
         // 3秒轮询 (全局仅注册一次): 晚出现的视频也能自动生效静音/倍速/连播绑定。
-        // 之前注册在"当时就找到视频"的分支里 — 页面刚打开还没有视频时 start() 重试
+        // 之前注册在"当时就找到视频"的分支里 — 页面刚打开还没有视频时 videoPulse() 重试
         // 超时放弃, 轮询永远不会注册 → 点开视频不生效, 必须刷新才能恢复。
         if (!window.__uoocPollTimer) {
             window.__uoocPollTimer = setInterval(function() {
                 applyVideoSettings();
-                bindVideoEvents();
+                attachVideoListeners();
                 refreshProgressPanel(); // 进度悬浮窗打开时自动刷新 (关闭状态直接返回)
                 // 连播自愈: ended 事件被吞/处理器被覆盖时, 视频会停在最后一秒 —
                 // 每 3 秒检查一次, 停在结尾就重试推进 (endedHandler 的 4 秒去重防连点)。
@@ -2901,17 +2789,17 @@
             }, 3000);
         }
 
-        bindKeyboardEvents();
-        bindVideoEvents();
-        autoQuiz();
+        bindHotkeys();
+        attachVideoListeners();
+        watchQuizPopups();
 
         // 动态查找视频元素 (支持SPA异步加载)
         var video = getCurrentVideo();
         if (!video) {
             window.__startRetryCount = (window.__startRetryCount || 0) + 1;
             if (window.__startRetryCount < 20) {
-                console.log('[UOOC助手] start() 中未找到视频元素，第', window.__startRetryCount, '次重试');
-                setTimeout(start, 500);
+                console.log('[UOOC助手] videoPulse() 中未找到视频元素，第', window.__startRetryCount, '次重试');
+                setTimeout(videoPulse, 500);
             } else {
                 console.warn('[UOOC助手] 重试20次后仍未找到视频元素，脚本进入监听模式');
                 // 2倍速模块会在视频加载后自动应用
@@ -2940,7 +2828,7 @@
                                     node.querySelector('.vjs-tech'))))) {
                         console.log('[UOOC助手] SPA检测到新视频元素，重新应用设置');
                         setTimeout(function() {
-                            bindVideoEvents();
+                            attachVideoListeners();
                             applyVideoSettings();
                         }, 300);
                         break;
@@ -2951,7 +2839,7 @@
         videoObserver.observe(videoContainer, { childList: true, subtree: true });
     }
 
-    function placeComponents() {
+    function mountUI() {
         console.log('[UOOC助手] 开始放置UI组件');
 
         // 界面已经在页面上 → 什么都不用做。
@@ -2981,89 +2869,99 @@
             });
         })();
 
-        function copyToClipboard(content) {
-            var t = document.createElement('textarea');
-            t.value = content;
-            document.body.appendChild(t);
-            t.select();
-            document.execCommand('copy');
-            document.body.removeChild(t);
+        // —— 小工具 ——
+        function buildEl(tag, cssText, parent) {
+            var el = document.createElement(tag);
+            if (cssText) el.style.cssText = cssText;
+            if (parent) parent.appendChild(el);
+            return el;
         }
 
-        function getCheckbox(name, text) {
-            var p = document.createElement('p');
-            p.style = 'color: #ccc; padding-left: 10px;';
-            var checkbox = document.createElement('input');
-            checkbox.id = checkbox.name = checkbox.value = name;
-            checkbox.type = 'checkbox';
-            checkbox.checked = true;
-            checkbox.style = 'margin-left: 15px; width: 12px; height: 12px;';
-            p.append(checkbox);
-            var label = document.createElement('label');
-            label.htmlFor = name;
-            label.innerText = text;
-            label.style = 'margin-left: 13px; font-size: 12px;';
-            p.append(label);
-            return p;
+        // 复制文本：优先异步剪贴板 API，失败（或不可用）退回隐藏 textarea 方案
+        function copyText(text, after) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(
+                    function() { if (after) after(); },
+                    function() { copyViaTextarea(text, after); }
+                );
+            } else {
+                copyViaTextarea(text, after);
+            }
+        }
+        function copyViaTextarea(text, after) {
+            var box = buildEl('textarea', 'position:fixed;left:-9999px;top:0;');
+            box.value = text;
+            document.body.appendChild(box);
+            box.select();
+            try {
+                document.execCommand('copy');
+                if (after) after();
+            } catch (e) {
+                prompt('复制失败，请手动复制：', text);
+            }
+            document.body.removeChild(box);
         }
 
-        function getContainer(_id) {
-            var container = document.createElement('div');
-            container.id = _id;
-            container.style = 'display: flex; flex-direction: row; align-items: center;';
-            return container;
+        // 一行开关 = 复选框 + 文字。ID 供全脚本定位：rate / volume / play / continue
+        function buildToggle(id, text) {
+            var line = buildEl('span', 'color: #ccc; padding-left: 10px;');
+            var box = buildEl('input', 'margin-left: 15px; width: 12px; height: 12px;', line);
+            box.type = 'checkbox';
+            box.id = id;
+            box.name = id;
+            box.checked = true;
+            var tip = buildEl('label', 'margin-left: 13px; font-size: 12px;', line);
+            tip.htmlFor = id;
+            tip.textContent = text;
+            return line;
         }
 
-        function getCopyButton() {
-            var copyButton = document.createElement('p');
-            copyButton.style = 'color: #ccc; padding-left: 10px;';
-            var btn = document.createElement('button');
-            btn.innerText = '复制题目答案';
-            btn.style = 'margin-left: 13px; padding: 0 5px 0; font-size: 12px; cursor: pointer;';
+        function buildRow(id) {
+            var row = buildEl('div', 'display: flex; flex-direction: row; align-items: center;');
+            row.id = id;
+            return row;
+        }
+
+        // 「复制题目答案」：把已提交测验的题干/答案/对错整理成文本复制出去
+        function buildCopyScoreButton() {
+            var wrap = buildEl('span', 'color: #ccc; padding-left: 10px;');
+            var btn = buildEl('button', 'margin-left: 13px; padding: 0 5px; font-size: 12px; cursor: pointer;', wrap);
+            btn.textContent = '复制题目答案';
             btn.onclick = function() {
                 try {
-                    var testPaperTop = frames[0] ? frames[0].document.querySelector('.testPaper-Top') : document.querySelector('.testPaper-Top');
-                    if (!testPaperTop) {
-                        alert('该页面不是测验页面，无法复制内容');
-                    } else {
-                        if (testPaperTop.querySelector('.fl_right')) {
-                            var queItems = frames[0] ? Array.from(frames[0].document.querySelectorAll('.queItems')) : Array.from(document.querySelectorAll('.queItems'));
-                            var content = queItems.map(queType => {
-                                var res = '';
-                                if (queType.querySelector('.queItems-type').innerText.indexOf('选') >= 0) {
-                                    var questions = queType.querySelectorAll('.queContainer');
-                                    res += Array.from(questions).map((question) => {
-                                        var que = question.querySelector('.queBox').innerText.replace(/\n{2,}/g, '\n').replace(/(\w\.)\n/g, '$1 ');
-                                        var ans = question.querySelector('.answerBox div:first-child').innerText.replace(/\n/g, '');
-                                        var scoresDiv = question.querySelector('.scores');
-                                        var right = false;
-                                        if (scoresDiv) {
-                                            var match = scoresDiv.innerText.match(/\d+\.?\d+/g);
-                                            if (match) {
-                                                var right = match.map(score => eval(score));
-                                                right = right[0] === right[1];
-                                            }
-                                        }
-                                        return `${que}\n${ans}\n是否正确：${right}\n`;
-                                    }).join('\n');
-                                }
-                                return res;
-                            }).join('\n');
-                            copyToClipboard(content);
-                            alert('题目及答案已复制到剪切板');
-                        } else {
-                            alert('该测验可能还没提交，无法复制');
-                        }
-                    }
+                    // 试卷在 iframe 里（老页面直接在主文档）
+                    var paperDoc = (frames[0] && frames[0].document) ? frames[0].document : document;
+                    var paperTop = paperDoc.querySelector('.testPaper-Top');
+                    if (!paperTop) { alert('该页面不是测验页面，无法复制内容'); return; }
+                    if (!paperTop.querySelector('.fl_right')) { alert('该测验可能还没提交，无法复制'); return; }
+                    var out = [];
+                    Array.from(paperDoc.querySelectorAll('.queItems')).forEach(function(section) {
+                        // 只收选择题大题（题干区文字带"选"字）
+                        if (section.querySelector('.queItems-type').innerText.indexOf('选') < 0) return;
+                        Array.from(section.querySelectorAll('.queContainer')).forEach(function(question) {
+                            var stem = question.querySelector('.queBox').innerText
+                                        .replace(/\n{2,}/g, '\n').replace(/(\w\.)\n/g, '$1 ');
+                            var answer = question.querySelector('.answerBox div:first-child').innerText.replace(/\n/g, '');
+                            var right = false;
+                            var scores = question.querySelector('.scores');
+                            if (scores) {
+                                var nums = (scores.innerText.match(/\d+\.?\d+/g) || []).map(Number);
+                                right = nums.length >= 2 && nums[0] === nums[1];   // 得分=满分 即答对
+                            }
+                            out.push(stem + '\n' + answer + '\n是否正确：' + right + '\n');
+                        });
+                    });
+                    copyText(out.join('\n'), function() { alert('题目及答案已复制到剪切板'); });
                 } catch (err) {
                     alert('复制出错：' + err.message);
                 }
             };
-            return copyButton;
+            return wrap;
         }
 
-        function setCheckboxes(container) {
-            var rateCheckbox = getCheckbox('rate', '倍速');
+        function buildControlPanel(container) {
+
+            var rateCheckbox = buildToggle('rate', '倍速');
             // 倍速选择器: 只列实测安全的两档(2x / 2.25x)。
             // 不做滑条了 —— 滑条能拖到 2.5x/3x/4x, 那些档会被平台判为无效观看并触发风控。
             var rateSelect = document.createElement('select');
@@ -3085,9 +2983,9 @@
                 if (document.getElementById('rate') && document.getElementById('rate').checked) setVideoRate(v);
             };
             rateCheckbox.appendChild(rateSelect);
-            var volumeCheckbox = getCheckbox('volume', '静音');
-            var playCheckbox = getCheckbox('play', '播放');
-            var continueCheckbox = getCheckbox('continue', '🚀 全自动');
+            var volumeCheckbox = buildToggle('volume', '静音');
+            var playCheckbox = buildToggle('play', '播放');
+            var continueCheckbox = buildToggle('continue', '🚀 全自动');
             continueCheckbox.title = '全自动：看完自动播下一个；测验自动AI作答并提交；讨论自动发布；文本/附件跳过';
             continueCheckbox.onchange = function() {
                 if (this.checked) {
@@ -3095,7 +2993,7 @@
                     console.log('[UOOC助手] 全自动已重新勾选，连播恢复');
                 }
             };
-            var copyButton = getCopyButton();
+            var copyButton = buildCopyScoreButton();
 
             // 创建LLM答题复选框和设置按钮
             var llmContainer = document.createElement('p');
@@ -3274,37 +3172,19 @@
             llmContainer.appendChild(autoSubmitCheckbox);
             llmContainer.appendChild(autoSubmitLabel);
 
-            if (rateCheckbox.firstElementChild) {
-                rateCheckbox.firstElementChild.onchange = function(event) {
-                    // 动态获取当前视频元素 (SPA导航后视频可能已替换)
-                    var v = getCurrentVideo();
-                    if (v) {
-                        if (event.target.checked) {
-                            setVideoRate(getUoocRate());
-                        }
-                        else setVideoRate(1);
-                    }
-                };
+            // 开关接回行为（此刻节点还没插进 DOM，直接在节点上挂 change）：
+            //   倍速 开→用面板所选档位 / 关→1x；静音 开→mute；播放 开→play / 关→pause
+            function wireToggle(toggleNode, apply) {
+                var box = toggleNode && toggleNode.firstElementChild;
+                if (!box) return;
+                box.addEventListener('change', function(ev) {
+                    var v = getCurrentVideo();   // SPA 导航后视频元素会被替换，用时再取
+                    if (v) apply(v, ev.target.checked);
+                });
             }
-
-            if (volumeCheckbox.firstElementChild) {
-                volumeCheckbox.firstElementChild.onchange = function(event) {
-                    var v = getCurrentVideo();
-                    if (v) {
-                        v.muted = event.target.checked;
-                    }
-                };
-            }
-
-            if (playCheckbox.firstElementChild) {
-                playCheckbox.firstElementChild.onchange = function(event) {
-                    var v = getCurrentVideo();
-                    if (v) {
-                        if (event.target.checked) v.play();
-                        else v.pause();
-                    }
-                };
-            }
+            wireToggle(rateCheckbox, function(v, on) { setVideoRate(on ? getUoocRate() : 1); });
+            wireToggle(volumeCheckbox, function(v, on) { v.muted = on; });
+            wireToggle(playCheckbox, function(v, on) { on ? v.play() : v.pause(); });
 
             var progressBtn = document.createElement('button');
             progressBtn.innerText = '📊 进度';
@@ -3363,16 +3243,9 @@
             container.appendChild(discussBtn);
         }
 
-        /*function setPrompt(container) {
-            var div = document.createElement('div');
-            div.innerHTML = `提示：<u>该版本为内测版，使用时请先关闭正式版</u>，<u><a href="https://greasyfork.org/zh-CN/scripts/425837-uooc-assistant-beta/feedback" target="_blank" style="color: yellow;">若出现 BUG 点此反馈</a></u>，键盘的 ← 和 → 可以控制快进/快退，↑ 和 ↓ 可以控制音量增大/减小，空格键可以控制播放/暂停`;
-            div.style = 'color: #cccccc; height: min-height; margin: 0 20px 0; padding: 0 5px; border-radius: 5px; font-size: 12px;';
-            container.appendChild(div);
-        }*/
-
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.16.0';
+            div.innerHTML = 'UOOC助手 by 理不尽 | v3.0.0';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
@@ -3411,9 +3284,9 @@
         ].join(';') + ';';
 
         // 控制台容器
-        var checkboxContainer = getContainer('checkbox-container');
+        var checkboxContainer = buildRow('checkbox-container');
         checkboxContainer.style.cssText = 'display: flex; flex-direction: row; align-items: center; flex-wrap: wrap;';
-        setCheckboxes(checkboxContainer);
+        buildControlPanel(checkboxContainer);
         setAttribution(checkboxContainer);
         bar.appendChild(checkboxContainer);
 
@@ -3448,55 +3321,41 @@
         return true;
     }
 
-    function bindKeyboardEvents() {
-        console.log('[UOOC助手] 绑定键盘事件');
+    function bindHotkeys() {
+        console.log('[UOOC助手] 绑定键盘快捷键');
         document.onkeydown = function(event) {
-            var complete = false;
-            var basicActiveDiv = document.querySelector('div.basic.active');
             var video = document.getElementById('player_html5_api') ||
-                        document.querySelector('video.vjs-tech');
-
-            if (!video) {
-                // 尝试延迟查找
-                video = document.querySelector('video');
-            }
+                        document.querySelector('video.vjs-tech') ||
+                        document.querySelector('video');
             if (!video) return;
 
-            if (basicActiveDiv && basicActiveDiv.classList.contains('complete')) complete = true;
-            switch (event.key) {
-                case 'ArrowLeft': {
-                    event.preventDefault();
-                    video.currentTime -= 10;
-                    break;
-                }
-                case 'ArrowRight': {
-                    event.preventDefault();
-                    if (complete) video.currentTime += 10;
-                    break;
-                }
-                case 'ArrowUp': {
-                    event.preventDefault();
-                    if (video.volume + 0.1 <= 1.0) video.volume += 0.1;
-                    else video.volume = 1.0;
-                    break;
-                }
-                case 'ArrowDown': {
-                    event.preventDefault();
-                    if (video.volume - 0.1 >= 0.0) video.volume -= 0.1;
-                    else video.volume = 0.0;
-                    break;
-                }
-                case ' ': {
-                    event.preventDefault();
-                    let continueCheckbox = document.getElementById('play');
-                    if (continueCheckbox) continueCheckbox.click();
-                    break;
-                }
+            if (event.key === 'ArrowLeft') {
+                event.preventDefault();
+                video.currentTime -= 10;
+                return;
+            }
+            if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                // 闯关模式：本节没打勾不允许快进跳课
+                if (document.querySelector('div.basic.active.complete')) video.currentTime += 10;
+                return;
+            }
+            if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                event.preventDefault();
+                var step = event.key === 'ArrowUp' ? 0.1 : -0.1;
+                video.volume = Math.min(1, Math.max(0, video.volume + step));
+                return;
+            }
+            if (event.key === ' ') {
+                event.preventDefault();
+                var playSwitch = document.getElementById('play');
+                if (playSwitch) playSwitch.click();
             }
         };
     }
 
     function findNextVideo() {
+
         var video = document.getElementById('player_html5_api') ||
                     document.querySelector('video.vjs-tech');
         var continueBox = document.getElementById('continue');
@@ -3514,145 +3373,15 @@
         // 于是"测验提交完 / 讨论发完"再调本函数时直接返回、什么都不做 ——
         // 表现就是"它自己提交完答案后不会接着连播，得手动点一下才继续"。
         {
-                let current_video = document.querySelector('.basic.active');
-                if (!current_video) {
-                    // 尝试备用选择器
-                    current_video = document.querySelector('.active-video, .current-video, .video-item.active');
-                }
-                if (!current_video) return;
+            // 定位目录里的"当前任务行"（旧版页面用 .basic.active，新版页面有各自类名）
+            let activeRow = document.querySelector('.basic.active') ||
+                            document.querySelector('.active-video, .current-video, .video-item.active');
+            if (!activeRow) return;
 
-                let next_part = current_video.parentNode;
-                let next_video = current_video;
-                // 连播只在视频之间切换: 讨论/测验/文档任务点一律跳过 (答题由用户手动完成)
-                let isVideo = (node) => { return Boolean(node && (node.querySelector('span.icon-video') || node.querySelector('.video-icon') || node.querySelector('[class*="video"]'))); };
-                let canBack = () => { return Boolean(next_part.parentNode.parentNode.tagName === 'LI'); };
-                let toNextVideo = () => {
-                    next_video = next_video.nextElementSibling;
-                    while (next_video && !isVideo(next_video)) next_video = next_video.nextElementSibling;
-                };
-                let isExistsVideo = () => {
-                    let _video = next_part.firstElementChild;
-                    while (_video && !isVideo(_video)) _video = _video.nextElementSibling;
-                    return Boolean(_video && isVideo(_video));
-                };
-                let isExistsNextVideo = () => {
-                    let _video = current_video.nextElementSibling;
-                    while (_video && !isVideo(_video)) _video = _video.nextElementSibling;
-                    return Boolean(_video && isVideo(_video));
-                };
-                let isExistsNextListAfterFile = () => {
-                    let part = next_part.nextElementSibling;
-                    return Boolean(part && part.childElementCount > 0);
-                };
-                let toNextListAfterFile = () => { next_part = next_part.nextElementSibling; };
-                let toOuterList = () => { next_part = next_part.parentNode.parentNode; };
-                let toOuterItem = () => { next_part = next_part.parentNode; };
-                let isExistsNextListAfterList = () => { return Boolean(next_part.nextElementSibling); };
-                let toNextListAfterList = () => { next_part = next_part.nextElementSibling; };
-                let expandList = () => {
-                    if (next_part.firstElementChild) {
-                        next_part.firstElementChild.click();
-                    }
-                };
-                let toExpandListFirstElement = () => {
-                    next_part = next_part.firstElementChild.nextElementSibling;
-                    if (next_part && next_part.classList.contains('unfoldInfo')) next_part = next_part.nextElementSibling;
-                };
-                let isList = () => { return Boolean(next_part && next_part.tagName === 'UL'); };
-                let toInnerList = () => { next_part = next_part.firstElementChild; };
-                let toFirstVideo = () => {
-                    next_video = next_part.firstElementChild;
-                    while (next_video && !isVideo(next_video)) next_video = next_video.nextElementSibling;
-                };
-
-                let mode = {
-                    FIRST_VIDEO: 'FIRST_VIDEO',
-                    NEXT_VIDEO: 'NEXT_VIDEO',
-                    LAST_LIST: 'LAST_LIST',
-                    NEXT_LIST: 'NEXT_LIST',
-                    INNER_LIST: 'INNER_LIST',
-                    OUTER_LIST: 'OUTER_LIST',
-                    OUTER_ITEM: 'OUTER_ITEM',
-                };
-
-                let search = (_mode) => {
-                    switch (_mode) {
-                        case mode.FIRST_VIDEO:
-                            if (isExistsVideo()) {
-                                toFirstVideo();
-                                if (next_video) next_video.click();
-                                start();
-                            } else if (isExistsNextListAfterFile()) {
-                                search(mode.LAST_LIST);
-                            } else if (window.canIgnoreTest) {
-                                next_part = next_part.lastElementChild;
-                                search(mode.OUTER_LIST);
-                            }
-                            break;
-                        case mode.NEXT_VIDEO:
-                            if (isExistsNextVideo()) {
-                                toNextVideo();
-                                if (next_video) next_video.click();
-                                start();
-                            } else if (isExistsNextListAfterFile()) {
-                                search(mode.LAST_LIST);
-                            } else {
-                                search(mode.OUTER_ITEM);
-                            }
-                            break;
-                        case mode.LAST_LIST:
-                            toNextListAfterFile();
-                            toInnerList();
-                            search(mode.INNER_LIST);
-                            break;
-                        case mode.NEXT_LIST:
-                            toNextListAfterList();
-                            search(mode.INNER_LIST);
-                            break;
-                        case mode.INNER_LIST:
-                            if (next_part.firstElementChild) {
-                                expandList();
-                                function waitForExpand() {
-                                    if (next_part.firstElementChild.nextElementSibling) {
-                                        if (next_part.firstElementChild.nextElementSibling.childElementCount === 0) {
-                                            search(mode.OUTER_LIST);
-                                        } else {
-                                            toExpandListFirstElement();
-                                            if (isList()) {
-                                                toInnerList();
-                                                search(mode.INNER_LIST);
-                                            } else {
-                                                search(mode.FIRST_VIDEO);
-                                            }
-                                        }
-                                    } else {
-                                        setTimeout(waitForExpand, 250);
-                                    }
-                                }
-                                waitForExpand();
-                            }
-                            break;
-                        case mode.OUTER_LIST:
-                            toOuterList();
-                            if (isExistsNextListAfterList()) {
-                                search(mode.NEXT_LIST);
-                            } else if (canBack()) {
-                                search(mode.OUTER_LIST);
-                            }
-                            break;
-                        case mode.OUTER_ITEM:
-                            toOuterItem();
-                            if (isExistsNextListAfterList()) {
-                                toNextListAfterList();
-                                search(mode.INNER_LIST);
-                            } else if (canBack()){
-                                search(mode.OUTER_LIST);
-                            }
-                            break;
-                        default:
-                            break;
-                    }
-                };
+            // 该行是否为视频任务：行内带视频图标才算（测验/讨论/文档各有自己的图标）
+            let isVideo = function(node) {
+                return Boolean(node && node.querySelector('[class*="video"], .video-icon, span.icon-video'));
+            };
 
                 // 顺序连播 (替代旧的跳跃式状态机):
                 // 闯关模式必须按顺序学, 严格从当前位置向后找 ——
@@ -3802,7 +3531,7 @@
                                 window.__uoocAutoChainStopped = false; // 主动前进 = 视为重新开始连播
                                 window.__uoocLastForwardClick = Date.now();
                                 row.click();
-                                start();
+                                videoPulse();
                                 return;
                             }
                             if (isQuizLike(row)) {
@@ -3867,7 +3596,7 @@
             // 在测评页面放置UI组件 (数学考试页面无视频播放器，无 .learn-head 会使用 fallback)
             setTimeout(function() {
                 var placed = false;
-                try { placed = placeComponents(); } catch (e) { console.error('[UOOC助手] 界面放置出错（看门狗会兜底重试）:', e); }
+                try { placed = mountUI(); } catch (e) { console.error('[UOOC助手] 界面放置出错（看门狗会兜底重试）:', e); }
                 if (placed) {
                     showQuizPageHint();
                     // 新增：如果自动LLM答题已启用，立即开始答题轮询
@@ -3877,7 +3606,7 @@
                     }
                 } else {
                     console.warn('[UOOC助手-AI] UI放置失败，2秒后重试...');
-                    setTimeout(function() { placeComponents(); }, 2000);
+                    setTimeout(function() { mountUI(); }, 2000);
                 }
             }, 800);
             // 延迟检测: iframe 可能稍后加载完毕
@@ -3885,7 +3614,7 @@
                 if (isQuizPage()) {
                     console.log('[UOOC助手-AI] iframe 测评已加载，确保UI已放置');
                     if (!document.getElementById('checkbox-container')) {
-                        placeComponents();
+                        mountUI();
                         showQuizPageHint();
                     }
                 }
@@ -3894,10 +3623,7 @@
         }
 
         // 视频学习页面
-        // 不再阻塞等待 jQuery — 新页面可能不加载 jQuery
-        // ckeckTestIgnorable 已改为使用原生 fetch
         console.log('[UOOC助手] jQuery可用:', typeof $ !== 'undefined');
-        ckeckTestIgnorable();
 
         function waitHead() {
             // 不再等待优课的头部元素: 界面现在挂在 document.body 上的固定控制条里,
@@ -3906,19 +3632,19 @@
             console.log('[UOOC助手] 放置界面（固定控制条，不依赖网站头部）');
             var uiSuccess = false;
             try {
-                uiSuccess = placeComponents();
-                if (uiSuccess) bindChapterChange();
+                uiSuccess = mountUI();
+                if (uiSuccess) watchCourseTree();
             } catch (e) {
                 console.error('[UOOC助手] 放置界面/绑定章节出错（界面看门狗会兜底重试）:', e);
             }
-            // ⚠️ 下面这段【不能】用 if (uiSuccess) 包住: 以前一旦 placeComponents 抛异常,
-            // 整条初始化链就断在这里 —— 连 start() 都执行不到, 于是 3 秒轮询/连播/答题
+            // ⚠️ 下面这段【不能】用 if (uiSuccess) 包住: 以前一旦 mountUI 抛异常,
+            // 整条初始化链就断在这里 —— 连 videoPulse() 都执行不到, 于是 3 秒轮询/连播/答题
             // 全部不工作; 而脚本底部那个独立的 2x 倍速模块照常运行, 表现就是
             // "功能还在、界面没了, 必须刷新"。界面本身改由独立看门狗兜底。
             {
 
                 function ready() {
-                    console.log('[UOOC助手] UOOC assistant beta has initialized.');
+                    console.log('[UOOC助手] 初始化完成。');
 
                     // 检查LLM启用状态和配置
                     if (window.llmEnabled) {
@@ -3934,7 +3660,7 @@
                         }
                     }
 
-                    start();
+                    videoPulse();
                 }
 
                 // 检测视频元素是否存在 (支持新旧页面)
@@ -3969,14 +3695,14 @@
                                 setTimeout(checkVideoReady, 300);
                             } else {
                                 console.log('[UOOC助手] 超时未找到视频元素，脚本已初始化但播放器可能尚未就绪');
-                                start();
+                                videoPulse();
                             }
                         };
                         setTimeout(checkVideoReady, 300);
                     } else {
                         console.log('[UOOC助手] 未找到视频元素/图标，脚本进入监听模式');
                         // 脚本已初始化，2倍速模块会在视频加载后自动应用
-                        start();
+                        videoPulse();
                     }
                 }
             }
@@ -4061,8 +3787,8 @@
     try { sessionStorage.removeItem('uooc_sweep_state'); } catch (e) {}
 
     // ==================== 界面看门狗 (独立于 init) ====================
-    // 为什么必须独立: init() 里若 placeComponents()/bindChapterChange() 抛异常,
-    // 整条初始化链会断掉(连 start() 都执行不到), 而那之后底部那个 2x 倍速模块仍然照常工作
+    // 为什么必须独立: init() 里若 mountUI()/watchCourseTree() 抛异常,
+    // 整条初始化链会断掉(连 videoPulse() 都执行不到), 而那之后底部那个 2x 倍速模块仍然照常工作
     // —— 这正是"功能还在、界面没了、必须刷新"的来源。看门狗挂在顶层, init 走没走完它都在。
     if (!window.__uoocUiWatchdog) {
         window.__uoocUiWatchdog = setInterval(function() {
@@ -4074,7 +3800,7 @@
                 if (!window.__uoocUiWatchdogAt || Date.now() - window.__uoocUiWatchdogAt > 3000) {
                     window.__uoocUiWatchdogAt = Date.now();
                     console.log('[UOOC助手] 看门狗: 界面上找不到 UI 组件，正在重新放置...');
-                    placeComponents();
+                    mountUI();
                 }
             } catch (e) {
                 console.warn('[UOOC助手] 看门狗重新放置界面失败:', e);
