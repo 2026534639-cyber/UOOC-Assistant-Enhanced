@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.15.3
+// @version      2.16.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.15.3 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.16.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -1880,7 +1880,9 @@
         });
     }
 
-    // ==================== 自动讨论：识别话题 → 多角度短发言 → 逐条发布 ====================
+    // ==================== 【已下架 v2.16.0】自动讨论（保留代码但无任何入口）====================
+    // 用户定调：不再帮人代发发言。讨论改为「📋 复制题目」按钮 + 使用者自己问 AI 自己粘贴。
+    // 以下函数链（autoDiscussFlow → startDiscussSweep → 清扫）已无调用入口，仅留作回滚参考。
     // 注意: 优课会用 AI 评估讨论发言质量并打击 AI 生成内容,
     // 所以生成的发言刻意保持学生口吻 (1-2 句、口语化、不同角度、无套话)
     // 讨论话题：新版讨论页结构 = .thesis > h2.thesis-title(标题) + .thesis-content(正文, ng-bind-html)
@@ -3322,24 +3324,42 @@
             container.appendChild(continueCheckbox);
             container.appendChild(copyButton);
             container.appendChild(progressBtn);
+            // 【v2.16.0】「自动讨论」已下架（帮人代发发言不再提供）。
+            // 现在只帮到"复制题目"这一步：点一下把当前讨论页的题目复制到剪贴板，
+            // 使用者自己拿去问 DeepSeek/豆包等 AI，把回答粘进页面回复框发表。
             var discussBtn = document.createElement('button');
-            discussBtn.innerText = '💬 自动讨论';
-            discussBtn.title = '自动讨论：只评论【还没评论过】的讨论（评论过的会记下来并跳过）。按住 Shift 点一下可清除记录、重新开始';
+            discussBtn.innerText = '📋 复制题目';
+            discussBtn.title = '复制当前讨论页的题目，拿去问 DeepSeek 等 AI，再把回答粘进回复框发表';
             discussBtn.style = 'margin-left: 8px; padding: 2px 8px; font-size: 12px; cursor: pointer; border: none; border-radius: 4px; background: #3d5a80; color: #fff;';
-            discussBtn.onclick = function(ev) {
-                // Shift+点击 = 清除"已评论过"的标记（想重新评论一遍时用）
-                if (ev && ev.shiftKey) {
-                    var marked = 0;
-                    try { marked = Object.keys(loadDiscussed()).length; } catch (e) {}
-                    if (!window.confirm('清除「已评论过」的记录？\n\n当前已标记 ' + marked +
-                        ' 个讨论。清除后，再点「自动讨论」会把这些讨论重新评论一遍（会再多发一条）。确定清除？')) return;
-                    clearDiscussed();
-                    alert('已清除「已评论过」的记录（' + marked + ' 个）');
+            discussBtn.onclick = function() {
+                var topic = (typeof getDiscussionTopic === 'function') ? getDiscussionTopic() : null;
+                if (!topic || !topic.trim()) {
+                    alert('当前页面不是讨论页（或题目还没加载出来）。\n先点进一个"讨论"，再点这个按钮。');
                     return;
                 }
-                if (typeof autoDiscussFlow === 'function') autoDiscussFlow();
+                var text = topic.trim();
+                var done = function() {
+                    alert('✅ 题目已复制！\n\n接下来：\n1. 打开 DeepSeek（或豆包/文心等任意 AI），把题目粘给它；\n2. 把 AI 的回答复制下来；\n3. 回到这个页面，粘进下方回复框，点"发表"即可。\n\n（回答建议自己顺一遍再发，太长可让它"用两三句口语化回答"）');
+                };
+                try {
+                    if (typeof GM_setClipboard === 'function') { GM_setClipboard(text); done(); return; }
+                } catch (e) {}
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(done).catch(function() { fallbackCopy(text, done); });
+                } else {
+                    fallbackCopy(text, done);
+                }
             };
-            window.__uoocDiscussBtn = discussBtn; // 清扫进行中要改按钮文案
+            function fallbackCopy(text, done) {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand('copy'); done(); }
+                catch (e) { prompt('复制失败，请手动复制题目：', text); }
+                document.body.removeChild(ta);
+            }
             container.appendChild(discussBtn);
         }
 
@@ -3352,7 +3372,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.15.3';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.16.0';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
@@ -3807,23 +3827,10 @@
                                 return;
                             }
                             if (isDiscussionRow(row)) {
-                                // 连播遇到讨论: 进入并自动发布多条不同角度发言 (静默)
-                                console.log('[UOOC助手] 连播遇到讨论，进入并自动发布');
-                                window.__uoocNavPending = true;
-                                window.__uoocNavPendingAt = Date.now();
-                                window.__uoocSilentAnswer = true;
-                                row.click();
-                                if (attemptsLeft > 1) {
-                                    // 注意: 这里必须用 attemptsLeft —— 原来写的是未定义的 attempts，
-                                    // 传进去是 NaN，于是"讨论页还没加载好"时的重试机制完全失效，
-                                    // 本该重试 8 次实际一次就跳过（网络慢时尤其明显）
-                                    // 重试次数固定给足：原来传 attemptsLeft-1，扫描展开层级把预算耗光后，讨论被点开了却没人去处理 → 链子就断在那
-                                    setTimeout(() => { autoDiscussContinueFlow(8); }, 3000);
-                                } else {
-                                    window.__uoocNavPending = false;
-                                    window.__uoocSilentAnswer = false;
-                                }
-                                return;
+                                // 【v2.16.0 自动讨论已下架】连播遇到讨论: 跳过, 交给使用者自己处理
+                                // （点「📋 复制题目」拿题目去问 AI，再把回答粘进回复框）
+                                console.log('[UOOC助手] 连播遇到讨论：自动讨论已下架，跳过（题目可用「📋 复制题目」按钮复制后自己问 AI）');
+                                continue;
                             }
                             continue; // 文本/附件: 跳过
                         }
@@ -4049,23 +4056,9 @@
     // 延迟应用2倍速（等待视频元素加载）
     setTimeout(applyToAllVideos, 1000);
 
-    // 上次讨论清扫是否被"整页刷新 / 页面崩溃 / 导航离开"打断？
-    // 这类中断会让 window 上的清扫状态消失 —— 表现就是"清扫突然不声不响地断了"。
-    // 所以把状态存 sessionStorage，脚本重启时给出明确提示，别让人以为是脚本坏了。
-    try {
-        var _prevSweep = sessionStorage.getItem('uooc_sweep_state');
-        if (_prevSweep) {
-            sessionStorage.removeItem('uooc_sweep_state');
-            var _o = JSON.parse(_prevSweep);
-            if (_o && _o.at && Date.now() - _o.at < 30 * 60 * 1000) {
-                var _mins = Math.max(1, Math.round((Date.now() - _o.at) / 60000));
-                console.warn('[UOOC助手-讨论] ⚠️ 上次讨论清扫在约 ' + _mins + ' 分钟前被中断' +
-                             '（当时已处理 ' + (_o.posted || 0) + ' 个讨论）。' +
-                             '常见原因：页面被整页刷新 / 页面崩溃 / 从课程里导航走 —— ' +
-                             '这些都会清空脚本状态，清扫就停在那里了。要接着刷就再点一次「💬 自动讨论」。');
-            }
-        }
-    } catch (e) {}
+    // 【v2.16.0】自动讨论/讨论清扫已下架 —— 旧的 sessionStorage 清扫状态直接清掉即可，
+    // 不再有"上次清扫被打断"的恢复提示。
+    try { sessionStorage.removeItem('uooc_sweep_state'); } catch (e) {}
 
     // ==================== 界面看门狗 (独立于 init) ====================
     // 为什么必须独立: init() 里若 placeComponents()/bindChapterChange() 抛异常,
