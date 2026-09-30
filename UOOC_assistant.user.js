@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.13.0
+// @version      2.14.0
 // @description  【使用前先看介绍/有问题可反馈】UOOC 助手：2倍速/静音/自动播放+连播(自动跳过测验与讨论)+AI答题(单选/多选/判断/填空/名词解释/问答/论述,未支持题型仅跳过该题)+自动LLM答题+数学图片识别+全课程进度统计+倍速可选2x/2.25x(实测2.5x以上会被平台判为无效观看并触发风控,故不提供)。提交试卷遇智能验证(人机验证)时自动暂停并提示本人手动完成，完成后自动继续。点击⚙️配置API。
 // @author       cc & wybbb1 (原作者); 理不尽 (维护)
 // @include      https://www.uooc.net.cn/home/learn/*
@@ -56,7 +56,7 @@
         // 5秒后自动隐藏
         setTimeout(function() { banner.style.display = 'none'; }, 5000);
     }
-    showDebugBanner('[UOOC助手] v2.13.0 已加载 — 查看控制台获取详情');
+    showDebugBanner('[UOOC助手] v2.14.0 已加载 — 查看控制台获取详情');
 
     // ==================== LLM配置管理模块 ====================
     const LLMConfig = {
@@ -2018,102 +2018,53 @@
         return longestCommonRun(x, y) / Math.max(1, Math.min(x.length, y.length));
     }
 
-    function maxSimToExisting(t, existing) {
-        var m = 0;
+    // 把"已有发言"拆成一句一句的碎片再比对：
+    // 页面上每个 .Reply-item-content 经常把好几条回复连成一大段（还有嵌套引用），
+    // 拿整段去比对，AI 写的回答只要跟其中某一句重合就会被判成"整段照抄"——
+    // 这就是之前"全是：内容跟已有发言几乎一字不差"的直接原因。
+    function existingFragments(existing) {
+        var frags = [];
         (existing || []).forEach(function(e) {
-            var s = replySimilarity(t, e);
-            if (s > m) m = s;
+            String(e || '').split(/[；;。\n]+/).forEach(function(f) {
+                f = String(f || '').trim();
+                if (f.length >= 6) frags.push(f);
+            });
         });
-        return m;
+        return frags;
     }
 
-    // 单条评分：越不像已有发言分越高；长度适中（20~90 字）略加分，太短扣分
-    function scoreReply(t, existing) {
-        var novelty = 1 - maxSimToExisting(t, existing);
-        var len = String(t).length;
-        var lenScore = (len >= 20 && len <= 90) ? 0.15 : (len < 12 ? -0.3 : 0);
-        return novelty + lenScore;
-    }
-
-    // 从一批候选里挑出 want 条"最不雷同"的：
-    //   【能力边界】这一步靠字符串相似度，只能合并【字面近似】的候选；
-    //   “意思一样但换了说法”（角度雷同）它抓不住 —— 那类只能靠提示词强制每条
-    //   用不同角度来解决（见 buildDiscussPrompt），这里不假装能识别语义。
-    //   ① 聚合：彼此太像的归成一簇（相似度 ≥ 0.45），每簇只留一条代表
-    //   ② 评分：跟已有发言越不像分越高
-    //   ③ 随机抽样：同分之间随机排序，避免每次挑出来的都一样
-    // 这一步专门解决"角度雷同"：模型往往一次给你三条一个意思的话，
-    // 直接发出去就变成刷屏，这里先把它们合并成一条代表、再按新颖度取前 N。
-    // 按"够不够格发"决定条数 —— 不固定 3 条。
-    // 好写、真实、跟已有发言拉得开的，就多发几条；勉强的一条就好；一条都不够格就不发（跳过这个讨论）。
-    //   · 聚合：字面近似的候选归成一簇，每簇留一条代表（避免"一个意思说三遍"）
-    //   · 评分：跟已有发言越不像分越高；长度 20~90 字略加分，过短扣分
-    //   · 随机抽样：同分之间随机排序，避免每次都挑同一批
-    // 【能力边界】聚合靠字符串相似度，只能合并字面近似的；"换个说法讲同一件事"
-    // 抓不住，那类靠提示词强制多角度解决（见 buildDiscussPrompt），这里不假装能识别语义。
-    // 话题是不是"提问型"（问一个知识性问题）。
-    // 区别对待的理由：提问型讨论（"什么叫函数的自然定义域？"）里，
-    // 【把问题答对答清楚】才是重点，跟别人说得像不代表没价值 —— 题目问的就是这个；
-    // 而开放式讨论（"谈谈你对…的看法"）里跟别人雷同就是刷屏。
-    // 所以提问型用更宽的新意门槛，避免"明明能答却不发"。
-    function isQuestionTopic(topic) {
-        var t = String(topic || '');
-        if (/[？?]/.test(t)) return true;
-        return /(什么叫|什么是|是什么|为什么|怎么|如何|是否|能不能|可不可以|举例说明|谈谈.*的(理解|区别|关系))/.test(t);
-    }
-
-    var REPLY_MAX = 3;        // 上限（好写的最多发这么多）
-    // 【所有讨论一律按「要答」处理】不设新意门槛、不做近似判重 ——
-    // 唯一还拦的是逐字照抄（与已有发言几乎一字不差，发了也没意义）。
-    // 以前分「提问型 / 开放式」两套门槛，结果开放式的也会被判「不够格」跳过，
-    // 连用户特意挑的、基本没人发过的讨论都发不出去 —— 这个判定整个删掉。
-    var REPLY_DUP = { floor: 8, ratio: 0.98 };   // 只有「几乎一字不差」才算照抄
-
-    function chooseReplies(cands, existing, maxWant, lines) {
+    // 从候选里挑出要发的条数（1~3，按随机抽样保持多样性）。
+    // 【不再有"够不够格"】跟已有发言像不像一概不管 —— 用户明确要求：学术题尽量答。
+    // 唯一拦的是【跟某条已有发言一字不差】（原样复读别人，发了也没意义）。
+    function chooseReplies(cands, existing, maxWant) {
         var cap = maxWant || REPLY_MAX;
-        var okLine = (lines && lines.ok != null) ? lines.ok : 1.0;   // 不再按「新意」筛
-        var dupOpts = REPLY_DUP;                             // 只拦逐字照抄
-        var list = (cands || []).filter(function(t) {
-            return t && String(t).trim().length >= 8 && !isDuplicateReply(t, existing, dupOpts);
-        });
+        var norm = function(t) { return String(t || '').replace(/\s/g, ''); };
+        var frags = existingFragments(existing);
+        var fragsNorm = frags.map(norm);
         var clusters = [];
-        list.forEach(function(t) {
+        (cands || []).forEach(function(t) {
+            var n = norm(t);
+            if (!n || n.length < 8) return;              // 太短不算一条发言
+            if (fragsNorm.indexOf(n) >= 0) return;        // 与某条已有发言一字不差
             for (var i = 0; i < clusters.length; i++) {
                 if (replySimilarity(t, clusters[i][0]) >= 0.45) { clusters[i].push(t); return; }
             }
             clusters.push([t]);
         });
+        // 每簇取最长的一条当代表，然后随机抽样（保持每次不太一样）
         var reps = clusters.map(function(c) {
-            return c.slice().sort(function(a, b) {
-                return maxSimToExisting(a, existing) - maxSimToExisting(b, existing);
-            })[0];
+            return c.slice().sort(function(a, b) { return b.length - a.length; })[0];
         });
-        var scored = reps.map(function(t) {
-            return { t: t, sim: maxSimToExisting(t, existing), s: scoreReply(t, existing), r: Math.random() };
-        }).sort(function(a, b) { return (b.s - a.s) || (a.r - b.r); });
-
-        console.log('[UOOC助手-讨论] 候选评分（共 ' + scored.length + ' 条，按新意排序）: ' +
-            JSON.stringify(scored.slice(0, 6).map(function(o) {
-                return { 跟已有相似: Math.round(o.sim * 100) / 100, 文: String(o.t).slice(0, 14) };
-            })));
-
-        var good = scored.filter(function(o) { return o.sim <= okLine; }).slice(0, cap);
-        if (good.length > 0) {
-            return { list: good.map(function(o) { return o.t; }),
-                     why: '挑出 ' + good.length + ' 条' };
-        }
-        // 【不再整条跳过】一条都没过线时，至少把最不雷同的那条发出去。
-        // 理由: 讨论讲究"参与了"，全跳过等于一个都没做（实测就是这么被跳空的）；
-        // 只有"跟已有发言几乎逐字相同"的候选才会在硬判重那步就被滤掉。
-        if (scored.length > 0) {
-            var best = scored[0];
-            return { list: [best.t],
-                     why: '挑出 1 条（与已有发言最不重合的一条）' };
-        }
-        return { list: [], why: 'AI 写出的内容跟已有发言几乎一字不差 → 没有可发的' };
+        var shuffled = reps.map(function(t) { return { t: t, r: Math.random() }; })
+                           .sort(function(a, b) { return a.r - b.r; })
+                           .map(function(o) { return o.t; });
+        var out = shuffled.slice(0, cap);
+        console.log('[UOOC助手-讨论] 候选 ' + (cands || []).length + ' 条 → 聚合后 ' + clusters.length +
+                    ' 簇 → 本次发 ' + out.length + ' 条');
+        return out;
     }
 
-    // 候选不够时：让模型把现有草稿"融合重写"成 want 条互不雷同的新发言
+
     function buildFusePrompt(topic, existing, seeds, want) {
         var pr = '这门课的讨论区话题是：' + topic + '\n';
         if (existing.length > 0) {
@@ -3361,7 +3312,7 @@
 
         function setAttribution(container) {
             var div = document.createElement('div');
-            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.13.0';
+            div.innerHTML = 'UOOC助手 by cc & wybbb1 / 理不尽 | v2.14.0';
             div.style = 'color: #888; font-size: 10px; margin: 2px 8px; padding: 0 4px; white-space: nowrap;';
             container.appendChild(div);
         }
@@ -3808,7 +3759,7 @@
                                 window.__uoocLastForwardClick = Date.now();
                                 row.click();
                                 if (attemptsLeft > 1) {
-                                    setTimeout(() => { autoCompleteQuizFlow(attemptsLeft - 1); }, 3000);
+                                    setTimeout(() => { autoCompleteQuizFlow(8); }, 3000);
                                 } else {
                                     window.__uoocNavPending = false;
                                     window.__uoocSilentAnswer = false;
@@ -3826,7 +3777,8 @@
                                     // 注意: 这里必须用 attemptsLeft —— 原来写的是未定义的 attempts，
                                     // 传进去是 NaN，于是"讨论页还没加载好"时的重试机制完全失效，
                                     // 本该重试 8 次实际一次就跳过（网络慢时尤其明显）
-                                    setTimeout(() => { autoDiscussContinueFlow(attemptsLeft - 1); }, 3000);
+                                    // 重试次数固定给足：原来传 attemptsLeft-1，扫描展开层级把预算耗光后，讨论被点开了却没人去处理 → 链子就断在那
+                                    setTimeout(() => { autoDiscussContinueFlow(8); }, 3000);
                                 } else {
                                     window.__uoocNavPending = false;
                                     window.__uoocSilentAnswer = false;
